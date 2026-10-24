@@ -1,0 +1,347 @@
+---
+// Request timeline explorer: queue + prefill + decode for one request, and how
+// batch size changes TPOT and throughput. Styled like the iotamine VM configurator.
+// Safe to use more than once per page.
+
+const PROMPTS = [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
+const PREFILL = [2000, 5000, 10000, 20000, 40000, 60000];
+const BATCH = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+---
+<div class="ltl card" data-ltl data-prompts={JSON.stringify(PROMPTS)} data-prefill={JSON.stringify(PREFILL)} data-batch={JSON.stringify(BATCH)}>
+  <div class="ltl-head">
+    <div class="ltl-title">
+      <strong>Request timeline</strong>
+      <span class="live-pill">live</span>
+    </div>
+    <div class="ltl-seg" role="group" aria-label="How TPOT is set">
+      <button type="button" data-mode="manual" aria-pressed="true">TPOT by hand</button>
+      <button type="button" data-mode="batch" aria-pressed="false">TPOT from batch</button>
+    </div>
+  </div>
+  <p class="ltl-note mono">Move the sliders and watch one request from the user's side.</p>
+
+  <div class="ltl-grid">
+    <label class="ltl-slider">
+      <span class="ltl-top"><span class="ltl-lbl mono">Prompt length</span><span class="ltl-val" data-out="prompt"></span></span>
+      <input type="range" min="0" max="8" step="1" value="4" data-in="prompt" aria-label="Prompt length" />
+      <span class="ltl-ends mono"><span>128</span><span>32K</span></span>
+    </label>
+    <label class="ltl-slider">
+      <span class="ltl-top"><span class="ltl-lbl mono">Output length</span><span class="ltl-val" data-out="output"></span></span>
+      <input type="range" min="10" max="2000" step="10" value="300" data-in="output" aria-label="Output length" />
+      <span class="ltl-ends mono"><span>10</span><span>2,000</span></span>
+    </label>
+    <label class="ltl-slider">
+      <span class="ltl-top"><span class="ltl-lbl mono">Prefill speed</span><span class="ltl-val" data-out="prefill"></span></span>
+      <input type="range" min="0" max="5" step="1" value="3" data-in="prefill" aria-label="Prefill speed" />
+      <span class="ltl-ends mono"><span>2K tok/s</span><span>60K tok/s</span></span>
+    </label>
+    <label class="ltl-slider">
+      <span class="ltl-top"><span class="ltl-lbl mono">Time in queue</span><span class="ltl-val" data-out="queue"></span></span>
+      <input type="range" min="0" max="2000" step="50" value="100" data-in="queue" aria-label="Time in queue" />
+      <span class="ltl-ends mono"><span>0 ms</span><span>2 s</span></span>
+    </label>
+    <label class="ltl-slider" data-show="manual">
+      <span class="ltl-top"><span class="ltl-lbl mono">TPOT</span><span class="ltl-val" data-out="tpot"></span></span>
+      <input type="range" min="5" max="200" step="1" value="20" data-in="tpot" aria-label="Time per output token" />
+      <span class="ltl-ends mono"><span>5 ms</span><span>200 ms</span></span>
+    </label>
+    <label class="ltl-slider" data-show="batch" hidden>
+      <span class="ltl-top"><span class="ltl-lbl mono">Batch size</span><span class="ltl-val" data-out="batch"></span></span>
+      <input type="range" min="0" max="8" step="1" value="4" data-in="batch" aria-label="Batch size" />
+      <span class="ltl-ends mono"><span>1</span><span>256</span></span>
+    </label>
+  </div>
+
+  <div class="ltl-timeline">
+    <div class="ltl-labels" data-out="seglabels"></div>
+    <div class="ltl-track" aria-hidden="true">
+      <span class="ltl-q" data-seg="q"></span>
+      <span class="ltl-p" data-seg="p"></span>
+      <span class="ltl-d" data-seg="d"></span>
+      <span class="ltl-mark" data-seg="mark"></span>
+    </div>
+    <div class="ltl-axis mono"><span>0</span><span data-out="ttftmark"></span><span data-out="end"></span></div>
+  </div>
+
+  <div class="ltl-results">
+    <div class="ltl-r"><span class="ltl-rl mono">TTFT</span><span class="ltl-rv" data-out="r-ttft"></span><span class="ltl-rs" data-out="r-ttft-s"></span></div>
+    <div class="ltl-r"><span class="ltl-rl mono">TPOT</span><span class="ltl-rv" data-out="r-tpot"></span><span class="ltl-rs" data-out="r-tpot-s"></span></div>
+    <div class="ltl-r"><span class="ltl-rl mono">End-to-end</span><span class="ltl-rv" data-out="r-e2e"></span><span class="ltl-rs" data-out="r-e2e-s"></span></div>
+    <div class="ltl-r"><span class="ltl-rl mono" data-out="r-4-l">Streaming speed</span><span class="ltl-rv" data-out="r-4"></span><span class="ltl-rs" data-out="r-4-s"></span></div>
+  </div>
+
+  <div class="ltl-badges">
+    <span class="ltl-badge mono" data-out="badge-read"></span>
+    <span class="ltl-badge mono" data-out="badge-mem" hidden></span>
+  </div>
+  <div class="ltl-formulas mono" data-out="formulas"></div>
+  <p class="ltl-foot mono" data-out="foot"></p>
+</div>
+
+<script>
+  // Batch model: Llama 3.1 8B in BF16 on one H100 SXM.
+  const WEIGHT_BYTES = 16.06e9;
+  const PARAMS = 8.03e9;
+  const BW = 3.35e12; // bytes per second
+  const PEAK = 989e12; // FLOPs per second (BF16, dense)
+  const KV_PER_TOKEN = 131072; // bytes (32 layers × 8 KV heads × 128 × 2 × 2 bytes)
+  const KV_ROOM = 52e9; // ≈ 80 GB × 0.9 − 16 GB weights − 4 GB overhead
+  const READING_TOK_S = 5.4; // rough rule of thumb: ~250 words per minute
+
+  const big = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  const t = (ms: number) => (ms >= 1000 ? (ms / 1000).toFixed(ms >= 10000 ? 1 : 2) + ' s' : Math.round(ms) + ' ms');
+  const k = (n: number) => (n >= 1024 ? n / 1024 + 'K' : String(n));
+
+  document.querySelectorAll<HTMLElement>('[data-ltl]').forEach((root) => {
+    const PROMPTS: number[] = JSON.parse(root.dataset.prompts!);
+    const PREFILL: number[] = JSON.parse(root.dataset.prefill!);
+    const BATCH: number[] = JSON.parse(root.dataset.batch!);
+    const $ = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const out = (name: string) => $(`[data-out="${name}"]`);
+    const val = (name: string) => Number($<HTMLInputElement>(`[data-in="${name}"]`).value);
+    let mode: 'manual' | 'batch' = 'manual';
+
+    root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) =>
+      b.addEventListener('click', () => {
+        mode = b.dataset.mode as 'manual' | 'batch';
+        root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((x) =>
+          x.setAttribute('aria-pressed', String(x === b)),
+        );
+        root.querySelectorAll<HTMLElement>('[data-show]').forEach((el) => {
+          el.hidden = el.dataset.show !== mode;
+        });
+        update();
+      }),
+    );
+    const inputs = root.querySelectorAll<HTMLInputElement>('input[type="range"]');
+    inputs.forEach((i) => i.addEventListener('input', update));
+
+    function update() {
+      inputs.forEach((i) => {
+        const p = ((Number(i.value) - Number(i.min)) / (Number(i.max) - Number(i.min))) * 100;
+        i.style.setProperty('--fill', `${p}%`);
+      });
+
+      const prompt = PROMPTS[val('prompt')];
+      const output = val('output');
+      const prefill = PREFILL[val('prefill')];
+      const queue = val('queue');
+      const batch = BATCH[val('batch')];
+
+      // TPOT
+      let tpot: number;
+      let memMs = 0;
+      let mathMs = 0;
+      const ctx = prompt + output / 2; // average context length during decode
+      if (mode === 'manual') {
+        tpot = val('tpot');
+      } else {
+        memMs = ((WEIGHT_BYTES + batch * ctx * KV_PER_TOKEN) / BW) * 1000;
+        mathMs = ((2 * PARAMS * batch) / PEAK) * 1000;
+        tpot = Math.max(memMs, mathMs);
+      }
+
+      const prefillMs = (prompt / prefill) * 1000;
+      const ttft = queue + prefillMs;
+      const decodeMs = tpot * (output - 1);
+      const e2e = ttft + decodeMs;
+      const userSpeed = 1000 / tpot;
+
+      out('prompt').textContent = `${big(prompt)} tokens`;
+      out('output').textContent = `${big(output)} tokens`;
+      out('prefill').textContent = `${big(prefill)} tok/s`;
+      out('queue').textContent = t(queue);
+      out('tpot').textContent = `${tpot.toFixed(0)} ms`;
+      out('batch').textContent = `${batch} users`;
+
+      // Timeline
+      const pct = (ms: number) => (ms / e2e) * 100;
+      const q = $('[data-seg="q"]');
+      const p = $('[data-seg="p"]');
+      const d = $('[data-seg="d"]');
+      const mark = $('[data-seg="mark"]');
+      q.style.left = '0%';
+      q.style.width = `${pct(queue)}%`;
+      p.style.left = `${pct(queue)}%`;
+      p.style.width = `${pct(prefillMs)}%`;
+      d.style.left = `${pct(ttft)}%`;
+      d.style.width = `${pct(decodeMs)}%`;
+      const ticks = Math.max(1, Math.min(output - 1, 60));
+      d.style.backgroundSize = `${100 / ticks}% 100%`;
+      mark.style.left = `${pct(ttft)}%`;
+
+      const labels: string[] = [];
+      const lab = (cls: string, text: string, left: number, width: number) =>
+        width > 9 ? `<span class="${cls}" style="left:${left}%;width:${width}%">${text}</span>` : '';
+      labels.push(lab('ltl-lq', 'queue', 0, pct(queue)));
+      labels.push(lab('ltl-lp', 'prefill', pct(queue), pct(prefillMs)));
+      labels.push(lab('ltl-ld', `decode · ${big(output)} tokens`, pct(ttft), pct(decodeMs)));
+      out('seglabels').innerHTML = labels.join('');
+
+      out('ttftmark').textContent = `first token ${t(ttft)}`;
+      (out('ttftmark') as HTMLElement).style.left = `${Math.min(Math.max(pct(ttft), 15), 70)}%`;
+      out('end').textContent = t(e2e);
+
+      // Results
+      out('r-ttft').textContent = t(ttft);
+      out('r-ttft-s').textContent = `queue ${t(queue)} + prefill ${t(prefillMs)}`;
+      out('r-tpot').textContent = `${tpot.toFixed(tpot < 10 ? 1 : 0)} ms`;
+      out('r-tpot-s').textContent = mode === 'batch' ? (memMs >= mathMs ? 'memory-bound step' : 'compute-bound step') : 'set by hand';
+      out('r-e2e').textContent = t(e2e);
+      out('r-e2e-s').textContent = `${big(output / (e2e / 1000))} tok/s on average`;
+      if (mode === 'batch') {
+        out('r-4-l').textContent = 'Whole GPU';
+        out('r-4').textContent = `${big(batch * userSpeed)} tok/s`;
+        out('r-4-s').textContent = `${big(userSpeed)} tok/s for each of ${batch} users`;
+      } else {
+        out('r-4-l').textContent = 'Streaming speed';
+        out('r-4').textContent = `${big(userSpeed)} tok/s`;
+        out('r-4-s').textContent = 'for this user, after the first token';
+      }
+
+      const br = out('badge-read');
+      if (userSpeed >= READING_TOK_S) {
+        br.textContent = `Faster than reading (~${READING_TOK_S} tok/s)`;
+        br.className = 'ltl-badge mono ok';
+      } else {
+        br.textContent = `Slower than reading (~${READING_TOK_S} tok/s)`;
+        br.className = 'ltl-badge mono bad';
+      }
+
+      const bm = out('badge-mem');
+      const kvNeed = batch * (prompt + output) * KV_PER_TOKEN;
+      if (mode === 'batch') {
+        bm.hidden = false;
+        if (kvNeed <= KV_ROOM) {
+          bm.textContent = `KV cache ${(kvNeed / 1e9).toFixed(1)} GB of ~52 GB free · fits`;
+          bm.className = 'ltl-badge mono ok';
+        } else {
+          bm.textContent = `KV cache ${(kvNeed / 1e9).toFixed(0)} GB > ~52 GB free · does not fit`;
+          bm.className = 'ltl-badge mono bad';
+        }
+      } else {
+        bm.hidden = true;
+      }
+
+      const lines = [
+        `TTFT = queue + prompt ÷ prefill speed = ${t(queue)} + ${big(prompt)} ÷ ${big(prefill)} = <b>${t(ttft)}</b>`,
+        `E2E = TTFT + TPOT × (${big(output)} − 1) = ${t(ttft)} + ${tpot.toFixed(1)} ms × ${big(output - 1)} = <b>${t(e2e)}</b>`,
+      ];
+      if (mode === 'batch') {
+        lines.unshift(
+          `TPOT = max( (16.06 GB + ${batch} × ${big(ctx)} tok × 128 KiB) ÷ 3.35 TB/s , 2 × 8.03B × ${batch} ÷ 989 TFLOPS ) = max(${memMs.toFixed(2)}, ${mathMs.toFixed(2)}) = <b>${tpot.toFixed(2)} ms</b>`,
+        );
+      }
+      out('formulas').innerHTML = lines.map((l) => `<div>${l}</div>`).join('');
+
+      out('foot').textContent =
+        mode === 'batch'
+          ? `Simple model: Llama 3.1 8B (BF16) on one H100. Each decode step reads all weights once plus every user's KV cache (average context = prompt + half the output = ${big(ctx)} tokens), or is limited by math if that is slower. Prefill of other users and all overheads are ignored, so real numbers are lower.`
+          : 'Simple model: TTFT = time in queue + prefill time. Network, tokenizer and other overheads are ignored.';
+    }
+
+    update();
+  });
+</script>
+
+<style is:global>
+  .ltl {
+    margin: 2.2em 0;
+    padding: 18px 20px 16px;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .ltl-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
+  .ltl-title { display: flex; align-items: center; gap: 10px; }
+  .ltl-title strong { font-size: 15px; color: var(--text); }
+  .ltl-note { font-size: 11.5px; color: var(--text-3); margin: 6px 0 14px !important; }
+  .ltl-seg { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-3); }
+  .ltl-seg button {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 5px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .ltl-seg button[aria-pressed='true'] { background: var(--accent); color: var(--on-accent); }
+
+  .ltl-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 22px;
+    padding: 14px 0 16px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .ltl-slider { display: flex; flex-direction: column; gap: 4px; margin: 0 !important; }
+  .ltl-slider[hidden] { display: none; }
+  .ltl-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .ltl-lbl { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2); }
+  .ltl-val { font-family: var(--font-mono); font-weight: 700; font-size: 13.5px; color: var(--text); white-space: nowrap; }
+  .ltl-ends { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-3); }
+
+  .ltl-timeline { padding: 16px 0 6px; }
+  .ltl-labels { position: relative; height: 18px; font-size: 11px; font-weight: 600; }
+  .ltl-labels span { position: absolute; top: 0; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ltl-lq { color: var(--text-3); }
+  .ltl-lp { color: var(--accent-text); }
+  .ltl-ld { color: var(--teal); }
+  .ltl-track {
+    position: relative;
+    height: 34px;
+    border-radius: 8px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .ltl-track span { position: absolute; top: 0; bottom: 0; transition: left 0.2s ease, width 0.2s ease; }
+  .ltl-q { background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 5px, var(--border) 5px, var(--border) 9px); }
+  .ltl-p { background: var(--accent); }
+  .ltl-d {
+    background-color: var(--teal-soft);
+    background-image: linear-gradient(90deg, var(--teal) 0 2px, transparent 2px);
+    background-repeat: repeat-x;
+  }
+  .ltl-mark { width: 3px; margin-left: -1px; background: var(--text) !important; }
+  .ltl-axis { position: relative; display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-3); margin-top: 5px; height: 16px; }
+  .ltl-axis [data-out='ttftmark'] { position: absolute; transform: translateX(-50%); color: var(--text); font-weight: 600; white-space: nowrap; }
+
+  .ltl-results { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-top: 10px; }
+  .ltl-r { display: flex; flex-direction: column; gap: 2px; padding: 11px 12px; border-left: 1px solid var(--border); min-width: 0; }
+  .ltl-r:first-child { border-left: 0; }
+  .ltl-rl { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); }
+  .ltl-rv { font-family: var(--font-mono); font-size: 19px; font-weight: 600; color: var(--accent-text); line-height: 1.2; white-space: nowrap; }
+  .ltl-rs { font-size: 11px; color: var(--text-2); line-height: 1.4; }
+
+  .ltl-badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .ltl-badge { font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 999px; }
+  .ltl-badge[hidden] { display: none; }
+  .ltl-badge.ok { background: var(--green-soft); color: var(--green); }
+  .ltl-badge.bad { background: var(--red-soft); color: var(--red); }
+  .ltl-formulas {
+    margin-top: 12px;
+    font-size: 11.5px;
+    color: var(--text-2);
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 10px 12px;
+    display: grid;
+    gap: 4px;
+    overflow-x: auto;
+  }
+  .ltl-formulas b { color: var(--accent-text); font-weight: 600; }
+  .ltl-foot { font-size: 11px; color: var(--text-3); margin-top: 10px !important; line-height: 1.55; }
+
+  @media (max-width: 640px) {
+    .ltl-grid { grid-template-columns: 1fr; }
+    .ltl-results { grid-template-columns: 1fr 1fr; }
+    .ltl-r:nth-child(3) { border-left: 0; }
+    .ltl-r:nth-child(n + 3) { border-top: 1px solid var(--border); }
+  }
+</style>
