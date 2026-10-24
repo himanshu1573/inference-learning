@@ -1,0 +1,479 @@
+---
+// A toy byte-level BPE tokenizer. When the page loads, it learns merges from a
+// small English text. The reader types text, chooses how many merges to use,
+// and sees the tokens. It is NOT Llama's real tokenizer, only the same idea.
+interface Props {
+  merges?: number;
+}
+const { merges = 300 } = Astro.props;
+const presets = ['English', 'Code', 'Numbers', 'Hindi', 'Emoji'];
+---
+<div class="tkp card" data-tokenizer-playground data-merges={merges}>
+  <div class="tkp-head">
+    <div class="tkp-title">
+      <strong>Tokenizer playground</strong>
+      <span class="live-pill">live</span>
+    </div>
+    <div class="tkp-seg" role="group" aria-label="Example text">
+      {presets.map((p, i) => (
+        <button type="button" data-preset={p} aria-pressed={i === 0 ? 'true' : 'false'}>{p}</button>
+      ))}
+    </div>
+  </div>
+  <p class="tkp-sub">A toy byte-level BPE tokenizer. It learned its merges from a short English text when this page loaded. Real tokenizers work the same way, with about 128,000 merges learned from trillions of words.</p>
+
+  <label class="tkp-field">
+    <span class="tkp-row"><span class="tkp-label">Your text</span><span class="tkp-val">edit me</span></span>
+    <textarea data-in="text" rows="3" spellcheck="false"></textarea>
+  </label>
+
+  <div class="tkp-controls">
+    <label class="tkp-field tkp-grow">
+      <span class="tkp-row"><span class="tkp-label">Merges used</span><span class="tkp-val"><b data-out="merges"></b> merges · vocab <b data-out="vocab"></b></span></span>
+      <input type="range" data-in="merges" min="0" max="400" step="10" />
+      <span class="tkp-scale"><span>0 (raw bytes)</span><span>400</span></span>
+    </label>
+    <div class="tkp-field">
+      <span class="tkp-row"><span class="tkp-label">Show</span></span>
+      <div class="tkp-seg tkp-seg-full" role="group" aria-label="Show text or IDs">
+        <button type="button" data-view="text" aria-pressed="true">Text</button>
+        <button type="button" data-view="ids" aria-pressed="false">IDs</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="tkp-tokens" data-out="tokens" aria-live="polite"></div>
+
+  <div class="tkp-results">
+    <div class="tkp-cell"><span class="tkp-k">Characters</span><span class="tkp-v" data-out="chars"></span></div>
+    <div class="tkp-cell"><span class="tkp-k">UTF-8 bytes</span><span class="tkp-v" data-out="bytes"></span></div>
+    <div class="tkp-cell"><span class="tkp-k">Tokens</span><span class="tkp-v" data-out="count"></span></div>
+    <div class="tkp-cell"><span class="tkp-k">Chars / token</span><span class="tkp-v" data-out="ratio"></span></div>
+  </div>
+  <p class="tkp-note" data-out="note"></p>
+</div>
+
+<script>
+  // ---- Training text: simple English, so English pieces get merged first. ----
+  const CORPUS = `The model reads the text and guesses the next token. Then it adds the token to the text and guesses again.
+This is how a language model writes an answer, one small piece at a time. The pieces are called tokens.
+A token can be a whole word, like the or and, or a part of a longer word, like ing or tion.
+Inference is the work of using a trained model to answer questions. Training is the work of teaching the model.
+When many people use the model at the same time, the server puts their requests in a queue.
+The scheduler takes requests from the queue and sends them to the GPU. The GPU does the heavy math.
+Memory is important. The weights of the model must be in the memory of the GPU before the first answer.
+Every answer starts with the prompt. The prompt is the text that you give to the model.
+People ask the model about many things: the weather, the news, their homework, their code and their health.
+The answer appears on the screen word by word, because the server sends each new token as soon as it is ready.
+Good servers are fast and cheap. They serve many users with the same hardware and they do not waste memory.
+The first token takes the longest time, because the model must read the whole prompt first.
+After that, the next tokens come quickly, one after another, until the model writes the end token.
+We measure the time to the first token and the time between tokens. We also measure the total number of tokens per second.
+Engineers build better and better systems: they change the hardware, the software and the way the model is stored.
+The best way to understand these systems is to look at the numbers and to try things yourself.
+There is nothing magic in a language model. It is a very large table of numbers and a simple recipe for using them.`;
+
+  const PRESETS: Record<string, string> = {
+    English: 'The quick brown fox jumps over the lazy dog. Inference servers answer many people at the same time.',
+    Code: 'def add(a, b):\n    return a + b\n\nprint(add(2, 3))',
+    Numbers: 'The price went from 1234567 to 2345678.90 in the year 2024.',
+    Hindi: 'नमस्ते, आप कैसे हैं? मैं ठीक हूँ।',
+    Emoji: 'Great job! 🎉🚀 See you soon 😀',
+  };
+
+  // Split text into chunks before BPE, like GPT-style tokenizers do.
+  // Merges never cross chunk borders. Numbers are cut into groups of up to 3 digits.
+  const SPLIT = /'(?:s|t|re|ve|m|ll|d)| ?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu;
+  const enc = new TextEncoder();
+  const MAX_MERGES = 500;
+
+  type Model = { ranks: Map<string, number>; pieces: number[][] };
+  let model: Model | null = null;
+
+  function train(): Model {
+    const counts = new Map<string, number>();
+    for (const m of CORPUS.matchAll(SPLIT)) counts.set(m[0], (counts.get(m[0]) || 0) + 1);
+    const words = [...counts.entries()].map(([w, c]) => ({ ids: Array.from(enc.encode(w)), c }));
+    const pieces: number[][] = Array.from({ length: 256 }, (_, i) => [i]);
+    const ranks = new Map<string, number>();
+    for (let r = 0; r < MAX_MERGES; r++) {
+      const pairCounts = new Map<string, number>();
+      for (const w of words) {
+        for (let i = 0; i < w.ids.length - 1; i++) {
+          const k = w.ids[i] + ',' + w.ids[i + 1];
+          pairCounts.set(k, (pairCounts.get(k) || 0) + w.c);
+        }
+      }
+      let best = '';
+      let bestCount = 0;
+      for (const [k, c] of pairCounts) {
+        if (c > bestCount || (c === bestCount && best !== '' && k < best)) {
+          best = k;
+          bestCount = c;
+        }
+      }
+      if (!best) break;
+      const [a, b] = best.split(',').map(Number);
+      const id = 256 + r;
+      ranks.set(best, r);
+      pieces.push([...pieces[a], ...pieces[b]]);
+      for (const w of words) w.ids = mergePair(w.ids, a, b, id);
+    }
+    return { ranks, pieces };
+  }
+
+  function mergePair(ids: number[], a: number, b: number, id: number) {
+    const out: number[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      if (i < ids.length - 1 && ids[i] === a && ids[i + 1] === b) {
+        out.push(id);
+        i++;
+      } else out.push(ids[i]);
+    }
+    return out;
+  }
+
+  function encode(text: string, limit: number): number[] {
+    const m = model!;
+    const result: number[] = [];
+    for (const match of text.matchAll(SPLIT)) {
+      let ids = Array.from(enc.encode(match[0]));
+      while (ids.length > 1) {
+        let bestRank = Infinity;
+        let bi = -1;
+        for (let i = 0; i < ids.length - 1; i++) {
+          const r = m.ranks.get(ids[i] + ',' + ids[i + 1]);
+          if (r !== undefined && r < limit && r < bestRank) {
+            bestRank = r;
+            bi = i;
+          }
+        }
+        if (bi === -1) break;
+        ids = mergePair(ids, ids[bi], ids[bi + 1], 256 + bestRank);
+      }
+      result.push(...ids);
+    }
+    return result;
+  }
+
+  const strictDecoder = new TextDecoder('utf-8', { fatal: true });
+  function label(id: number): { text: string; partial: boolean } {
+    const bytes = new Uint8Array(model!.pieces[id]);
+    try {
+      const s = strictDecoder.decode(bytes);
+      return { text: s.replace(/ /g, '·').replace(/\n/g, '↵'), partial: false };
+    } catch {
+      return { text: Array.from(bytes, (b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' '), partial: true };
+    }
+  }
+
+  function setFill(input: HTMLInputElement) {
+    const min = Number(input.min), max = Number(input.max), v = Number(input.value);
+    input.style.setProperty('--fill', `${((v - min) / (max - min)) * 100}%`);
+  }
+
+  function init(root: HTMLElement) {
+    if (!model) model = train();
+    const q = <T extends Element>(sel: string) => root.querySelector<T>(sel)!;
+    const out = (name: string) => q<HTMLElement>(`[data-out="${name}"]`);
+    const textIn = q<HTMLTextAreaElement>('[data-in="text"]');
+    const mergesIn = q<HTMLInputElement>('[data-in="merges"]');
+    const state = { view: 'text', merges: Math.min(MAX_MERGES, Number(root.dataset.merges) || 300) };
+    textIn.value = PRESETS.English;
+    mergesIn.value = String(state.merges);
+
+    function render() {
+      const text = textIn.value;
+      const ids = encode(text, state.merges);
+      const raw = enc.encode(text).length;
+      const chars = [...text].length;
+      out('merges').textContent = String(state.merges);
+      out('vocab').textContent = String(256 + Math.min(state.merges, model!.ranks.size));
+      out('chars').textContent = String(chars);
+      out('bytes').textContent = String(raw);
+      out('count').textContent = String(ids.length);
+      out('ratio').textContent = ids.length ? (chars / ids.length).toFixed(2) : '–';
+      const saved = raw ? Math.round((1 - ids.length / raw) * 100) : 0;
+      const partial = ids.filter((id) => label(id).partial).length;
+      out('note').textContent =
+        `${saved}% fewer tokens than raw bytes (${raw}).` +
+        (partial ? ` ${partial} token${partial > 1 ? 's are' : ' is'} only part of a character (shown as hex bytes): the toy never learned merges for this script.` : '') +
+        ' · = space, ↵ = new line.';
+
+      const box = out('tokens');
+      box.replaceChildren();
+      ids.forEach((id, i) => {
+        const span = document.createElement('span');
+        const l = label(id);
+        span.className = `tkp-tok tkp-c${i % 5}${l.partial ? ' tkp-partial' : ''}`;
+        span.textContent = state.view === 'ids' ? String(id) : l.text;
+        span.title = `ID ${id}${l.partial ? ' (part of a character)' : ''}`;
+        box.append(span);
+      });
+
+      root.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.view === state.view)));
+      setFill(mergesIn);
+    }
+
+    root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) =>
+      b.addEventListener('click', () => {
+        textIn.value = PRESETS[b.dataset.preset!];
+        root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        render();
+      }),
+    );
+    root.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.view = b.dataset.view!;
+        render();
+      }),
+    );
+    textIn.addEventListener('input', () => {
+      root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((x) => x.setAttribute('aria-pressed', 'false'));
+      render();
+    });
+    mergesIn.addEventListener('input', () => {
+      state.merges = Number(mergesIn.value);
+      render();
+    });
+    render();
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-tokenizer-playground]').forEach(init);
+</script>
+
+<style is:global>
+  .tkp {
+    margin: 2em 0;
+    padding: 18px 18px 16px;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .tkp-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+  .tkp-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .tkp-title strong {
+    font-size: 15px;
+  }
+  .tkp-sub {
+    margin: 6px 0 14px !important;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  .tkp-seg {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface-3);
+  }
+  .tkp-seg button {
+    border: 0;
+    background: transparent;
+    color: var(--text-2);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 5px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .tkp-seg button:hover {
+    color: var(--text);
+  }
+  .tkp-seg button[aria-pressed='true'] {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .tkp-seg-full {
+    display: flex;
+    margin-top: 6px;
+  }
+  .tkp-seg-full button {
+    flex: 1;
+  }
+  .tkp-field {
+    display: block;
+    padding: 10px 12px 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .tkp-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .tkp-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-2);
+  }
+  .tkp-val {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .tkp-val b {
+    font-size: 14px;
+    color: var(--text);
+  }
+  .tkp textarea {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-3);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    font-variant-ligatures: none;
+  }
+  .tkp textarea:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .tkp-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 150px;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .tkp-scale {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-3);
+  }
+  .tkp-tokens {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 12px;
+    padding: 12px;
+    min-height: 56px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 10px;
+    background: var(--surface-3);
+  }
+  .tkp-tok {
+    --c: var(--accent);
+    --cs: var(--accent-soft);
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 5px;
+    background: var(--cs);
+    border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre;
+    font-variant-ligatures: none;
+  }
+  .tkp-c1 {
+    --c: var(--green);
+    --cs: var(--green-soft);
+  }
+  .tkp-c2 {
+    --c: var(--amber);
+    --cs: var(--amber-soft);
+  }
+  .tkp-c3 {
+    --c: var(--violet);
+    --cs: var(--violet-soft);
+  }
+  .tkp-c4 {
+    --c: var(--teal);
+    --cs: var(--teal-soft);
+  }
+  .tkp-partial {
+    border-style: dashed;
+    font-size: 10.5px;
+    color: var(--text-2);
+  }
+  .tkp-results {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-top: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .tkp-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border-left: 1px solid var(--border);
+    min-width: 0;
+  }
+  .tkp-cell:first-child {
+    border-left: 0;
+  }
+  .tkp-k {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .tkp-v {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--accent-text);
+  }
+  .tkp-note {
+    margin-top: 10px !important;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-3);
+  }
+  @media (max-width: 560px) {
+    .tkp-controls {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .tkp-results {
+      grid-template-columns: 1fr 1fr;
+    }
+    .tkp-cell:nth-child(3) {
+      border-left: 0;
+    }
+    .tkp-cell:nth-child(n + 3) {
+      border-top: 1px solid var(--border);
+    }
+  }
+  @media (max-width: 420px) {
+    .tkp {
+      padding: 14px 12px;
+    }
+    .tkp-seg button {
+      padding: 5px 7px;
+      font-size: 11px;
+    }
+  }
+</style>
