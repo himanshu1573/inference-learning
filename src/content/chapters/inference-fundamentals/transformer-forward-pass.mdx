@@ -1,0 +1,497 @@
+---
+title: 'Inside the Forward Pass'
+description: 'Open one transformer layer of Llama 3.1 8B and follow the numbers: normalisation, attention, the MLP, and how many weights and FLOPs each part uses.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import TfpModelOverview from '../../../components/figures/inference-fundamentals/TfpModelOverview.astro';
+import TfpLayerBlock from '../../../components/figures/inference-fundamentals/TfpLayerBlock.astro';
+import TfpAttentionSteps from '../../../components/figures/inference-fundamentals/TfpAttentionSteps.astro';
+import TfpGqaHeads from '../../../components/figures/inference-fundamentals/TfpGqaHeads.astro';
+import TfpParamBars from '../../../components/figures/inference-fundamentals/TfpParamBars.astro';
+
+In Phase 1 we treated the model as "a big file of numbers" that the GPU must read for every token. Now we open the file. We will follow one token through one layer of **Llama 3.1 8B**, write down the shape of every matrix, and count every weight. At the end, the famous number "8 billion" will not be a mystery any more: you will be able to rebuild it yourself.
+
+<NewWords
+  words={[
+    { word: 'Forward pass', meaning: 'One full run of the model from input tokens to output scores. Inference is many forward passes.' },
+    { word: 'Hidden size', meaning: 'How many numbers describe one token inside the model. For Llama 3.1 8B it is 4096.' },
+    { word: 'Decoder layer', meaning: 'One repeated block of the model: attention, then an MLP. Llama 3.1 8B has 32 of them.' },
+    { word: 'Attention', meaning: 'The step where each token looks at earlier tokens and collects useful information from them.' },
+    { word: 'Q, K, V', meaning: 'Query, Key and Value: three vectors made from each token. Queries search, keys are matched, values are collected.' },
+    { word: 'Head', meaning: 'One independent attention "channel" of 128 numbers. Many heads run side by side.' },
+    { word: 'MLP', meaning: 'Multi-layer perceptron: the second half of a layer, where each token is processed on its own with big matrices.' },
+    { word: 'Residual connection', meaning: 'Adding a block’s input to its output, so each block only has to learn a small change.' },
+    { word: 'RMSNorm', meaning: 'A step that rescales a vector so its numbers have a steady size. It keeps the math stable.' },
+    { word: 'Logits', meaning: 'The raw scores the model gives to every token in the vocabulary, before they become probabilities.' },
+  ]}
+/>
+
+## The simple picture: an assembly line with 32 stations
+
+Think of the model as an assembly line in a factory. A token enters as a rough part. It passes **32 stations**, one after another. Every station is built in the same way, but each one has its own tools (its own weights). At every station, two workers make a small improvement:
+
+1. The **attention worker** looks at the other parts on the line (the earlier tokens) and asks: "What do I need to know from them?"
+2. The **MLP worker** then improves the part on its own, using knowledge stored in its large tables.
+
+After station 32, an inspector looks at the finished part and writes a score for every possible next token. The highest scores are the most likely next words.
+
+<Figure n="4.1" title="The whole forward pass of Llama 3.1 8B" caption="Token IDs become rows of 4096 numbers. Those rows pass through 32 identical decoder layers. A final normalisation and the LM head turn the last row into 128,256 scores, one for each token in the vocabulary.">
+  <TfpModelOverview />
+</Figure>
+
+Let us give real sizes to each step, using **n** for the number of tokens we are processing.
+
+| Step | What it does | Output shape |
+| --- | --- | --- |
+| Tokenizer | Text to token IDs | `[n]` |
+| Embedding | Looks up one row of 4096 numbers for each ID | `[n × 4096]` |
+| 32 decoder layers | Each layer improves every row a little | `[n × 4096]` |
+| Final RMSNorm | Rescales each row | `[n × 4096]` |
+| LM head | Multiplies by a 4096 × 128,256 matrix | `[n × 128,256]` |
+
+<Callout type="idea">
+
+Inside the model, **a token is a row of 4096 numbers**. This row is often called the **hidden state**. Every layer reads this row and writes back an improved row of the same size. The size 4096 is called the **hidden size** (people often write it as $d$ or $d_{model}$).
+
+</Callout>
+
+### Step 0: the embedding table
+
+The embedding is the simplest part. It is a table with **128,256 rows** (one per token in the vocabulary) and **4096 columns**. To embed token ID 9822 (" France"), the model just copies row 9822. There is no multiplication at all. It is a lookup, like finding a word in a dictionary.
+
+The table has $128{,}256 \times 4096 \approx 525$ million numbers. That is a lot of memory, but almost no compute.
+
+## Inside one decoder layer
+
+Now the main part. Every one of the 32 layers has the same structure. Here it is, top to bottom, with every shape.
+
+<Figure n="4.2" title="One decoder layer of Llama 3.1 8B" caption="The attention block (blue) lets tokens share information. The MLP block (violet) processes each token on its own. The dashed lines are residual connections: the input is added back after each block. Weight shapes are on the right.">
+  <TfpLayerBlock />
+</Figure>
+
+We will now walk through it step by step.
+
+### Step 1: RMSNorm, keep the numbers at a steady size
+
+After many layers, the numbers in the hidden state could become very big or very small. That would break the math. So before each block, the model **rescales** the row. RMSNorm divides each number by the "root mean square" of the whole row, then multiplies by a learned scale.
+
+$$
+\text{RMSNorm}(x)_i = \frac{x_i}{\sqrt{\frac{1}{d}\sum_{j=1}^{d} x_j^2 + \epsilon}} \cdot g_i
+$$
+
+Here $\epsilon$ is a tiny number (like $10^{-5}$) that avoids dividing by zero, and $g$ is a learned vector of 4096 scale numbers.
+
+<Callout type="example" title="RMSNorm with 2 numbers">
+
+Take $x = [3, 4]$ and $g = [1, 1]$. The mean of the squares is $(9 + 16)/2 = 12.5$. The square root is $\approx 3.54$. So the output is $[3/3.54,\ 4/3.54] \approx [0.85,\ 1.13]$. The direction of the vector stays the same; only its size changes.
+
+</Callout>
+
+RMSNorm has only 4096 weights (the vector $g$). It is cheap. But it is important: without it, deep models are very hard to train.
+
+### Step 2: make Q, K and V
+
+Now each token makes three new vectors by multiplying its row by three weight matrices:
+
+- **Query (Q):** "What am I looking for?"
+- **Key (K):** "What do I contain?" (a label that other tokens can match against)
+- **Value (V):** "What will I give if someone picks me?"
+
+<Callout type="analogy" title="A library">
+
+Imagine a library. Your **query** is the question in your head. Every book has a **key**: the title on its spine. You compare your question with every title. Books whose title matches your question well get more of your attention. Then you read their **contents** (the values) and mix what you learned.
+
+</Callout>
+
+The sizes are where Llama 3.1 gets interesting. The model has **32 query heads** and only **8 key/value heads**. Each head has **128** numbers.
+
+- $Q$ has $32 \times 128 = 4096$ numbers per token, so $W_Q$ is $4096 \times 4096$.
+- $K$ has $8 \times 128 = 1024$ numbers per token, so $W_K$ is $4096 \times 1024$.
+- $V$ also has 1024 numbers per token, so $W_V$ is $4096 \times 1024$.
+
+Why fewer K/V heads? This trick is called **grouped-query attention (GQA)**. Four query heads share one key head and one value head. It saves a lot of memory in the KV cache (the saved K and V of past tokens). We study it deeply in the chapter on [attention variants](/inference-fundamentals/attention-variants).
+
+<Figure n="4.3" title="Grouped-query attention: 32 query heads, 8 K/V heads" caption="Each group of 4 query heads uses the same key head and value head. K and V are only 1024 numbers per token instead of 4096, so the KV cache is 4 times smaller than it would be with one K/V head per query head.">
+  <TfpGqaHeads />
+</Figure>
+
+### Step 3: RoPE, tell the model where each token is
+
+Attention by itself does not know the **order** of tokens. "Dog bites man" and "man bites dog" would look the same. So the model adds position information with **RoPE** (Rotary Position Embedding).
+
+The idea is simple. Split each Q and K vector into **pairs of numbers**. Think of each pair as an arrow on a flat page. Then **rotate** each arrow by an angle that depends on the token's position: token 1 a little, token 2 a bit more, and so on. Different pairs rotate at different speeds: some fast, some very slow.
+
+Why rotation? Because when you take the dot product of a rotated query and a rotated key, the result depends only on **how far apart** the two tokens are, not on their absolute positions. That is exactly what we want for language: "the word just before me" means the same thing at position 10 and at position 10,000.
+
+RoPE has **no weights**. It is a fixed formula, applied to Q and K (not to V).
+
+### Step 4: attention itself
+
+This is the heart of the transformer. For each head, every token compares its query with the keys of all tokens **up to and including itself**, turns the scores into weights, and mixes the values.
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_{head}}} + M\right) V
+$$
+
+Let us read this formula slowly:
+
+- $QK^\top$: the dot product of every query with every key. A big number means "this key matches my query well".
+- $\div \sqrt{d_{head}}$: divide by $\sqrt{128} \approx 11.3$. This keeps the scores in a sensible range, so softmax does not become too extreme.
+- $+ M$: the **causal mask**. It adds $-\infty$ to every score where a token would look at a **future** token. After softmax, those become exactly 0. A token may only use the past.
+- **softmax**: turns each row of scores into weights between 0 and 1 that add up to 1.
+- $\times V$: each token's output is a weighted mix of the value vectors.
+
+The best way to understand this is to do it by hand once, with tiny numbers.
+
+<Derivation title="Attention by hand: 3 tokens, 2 numbers per vector" result="The output for “cats” is [1.76, 1.00]: half from itself, a quarter from each earlier token.">
+
+1. Our prompt is "I like cats". We compute the output for the last token, "cats". Its query is $q_3 = [1, 1]$. The three keys are:
+
+   $$
+   k_1 = [1, 0], \quad k_2 = [0, 1], \quad k_3 = [1, 1]
+   $$
+
+2. Dot products (multiply matching numbers, then add):
+
+   $$
+   q_3 \cdot k_1 = 1, \quad q_3 \cdot k_2 = 1, \quad q_3 \cdot k_3 = 1 + 1 = 2
+   $$
+
+3. Divide by $\sqrt{d} = \sqrt{2} \approx 1.414$:
+
+   $$
+   [0.71,\ 0.71,\ 1.41]
+   $$
+
+4. Softmax: take $e^x$ of each, then divide by the sum.
+
+   $$
+   e^{0.71} \approx 2.03, \quad e^{1.41} \approx 4.11, \quad \text{sum} \approx 2.03 + 2.03 + 4.11 = 8.17
+   $$
+
+   $$
+   \text{weights} \approx [0.25,\ 0.25,\ 0.50]
+   $$
+
+5. Mix the values $v_1 = [1, 0]$, $v_2 = [0, 2]$, $v_3 = [3, 1]$:
+
+   $$
+   0.25 \cdot [1, 0] + 0.25 \cdot [0, 2] + 0.50 \cdot [3, 1] = [1.76,\ 1.00]
+   $$
+
+   (With unrounded weights 0.248, 0.248 and 0.504.)
+
+</Derivation>
+
+<Figure n="4.4" title="The attention example as a picture" caption="Left: the causal mask. Each token may look at itself and earlier tokens only. Middle: scores for “cats” become weights after scaling and softmax. Right: the output is a weighted mix of the value vectors.">
+  <TfpAttentionSteps />
+</Figure>
+
+In the real model, this happens with 128 numbers per head instead of 2, with 32 heads in parallel, and with thousands of tokens. But the steps are exactly the same.
+
+<Callout type="real" title="Where the KV cache comes from">
+
+Look again at step 4. To compute attention for "cats", we needed the **keys and values of all earlier tokens**. When the model writes the next token, it needs them again, and again for every token after that. Instead of recomputing them each time, engines **save** K and V for every token in GPU memory. That saved data is the **KV cache**. For Llama 3.1 8B it is $2 \times 1024$ numbers per token per layer, or 128 KiB per token for all 32 layers in BF16. See the chapter on [the KV cache](/inference-fundamentals/kv-cache).
+
+</Callout>
+
+### Step 5: output projection and the first residual
+
+The 32 heads each produced 128 numbers. They are joined together into one row of $32 \times 128 = 4096$ numbers, then multiplied by one more matrix, $W_O$ of size $4096 \times 4096$. This lets the heads' results mix.
+
+Then comes the **residual connection**: the block's output is **added** to the block's input.
+
+$$
+x \leftarrow x + \text{Attention}(\text{RMSNorm}(x))
+$$
+
+<Callout type="analogy" title="Edit, do not rewrite">
+
+The residual connection is like editing a document with "track changes". Each block does not rewrite the whole document. It only adds small corrections on top. This makes deep networks much easier to train, and it means the original token information is never lost.
+
+</Callout>
+
+### Step 6: the MLP block
+
+The second half of the layer works on each token **on its own**. No token looks at any other token here. Llama uses a version called **SwiGLU**, with three matrices:
+
+$$
+\text{MLP}(x) = W_{down} \big( \text{SiLU}(x W_{gate}) \odot (x W_{up}) \big)
+$$
+
+In words:
+
+1. Multiply the row by $W_{gate}$ ($4096 \times 14336$) and by $W_{up}$ ($4096 \times 14336$). The row becomes **much wider**: 14,336 numbers. This wider space gives the model room to "think".
+2. Apply **SiLU** to the gate result. SiLU is a smooth on/off switch: $\text{SiLU}(z) = z \cdot \frac{1}{1 + e^{-z}}$. Big positive values pass, negative values are pushed close to 0.
+3. Multiply the two wide rows number by number (the $\odot$ symbol). The gate decides how much of each "up" number to keep.
+4. Multiply by $W_{down}$ ($14336 \times 4096$) to come back to 4096 numbers.
+
+Then the second residual: $x \leftarrow x + \text{MLP}(\text{RMSNorm}(x))$. The layer is done, and the row goes to the next layer.
+
+<Callout type="idea">
+
+Many researchers think of the MLP as the place where the model stores **facts** ("Paris is the capital of France"), and attention as the place where it **moves information between tokens**. This is a simplification, but it is a useful one.
+
+</Callout>
+
+## Counting the weights: where do 8 billion come from?
+
+Now we have all the shapes, so we can count. This is one of the most useful skills in inference engineering: from a model's config file, you can compute its size, its memory and its FLOPs.
+
+<Derivation title="Weights in one Llama 3.1 8B layer" result="About 218 million weights per layer: 42 M in attention and 176 M in the MLP.">
+
+1. Attention projections:
+
+   $$
+   W_Q: 4096 \times 4096 = 16{,}777{,}216
+   $$
+
+   $$
+   W_K, W_V: 4096 \times 1024 = 4{,}194{,}304 \text{ each}
+   $$
+
+   $$
+   W_O: 4096 \times 4096 = 16{,}777{,}216
+   $$
+
+   Attention total: $41{,}943{,}040 \approx 41.9$ M.
+
+2. MLP projections, three matrices of $4096 \times 14336$:
+
+   $$
+   3 \times 58{,}720{,}256 = 176{,}160{,}768 \approx 176.2 \text{ M}
+   $$
+
+3. Two RMSNorm scale vectors: $2 \times 4096 = 8{,}192$.
+
+4. Add them up:
+
+   $$
+   41{,}943{,}040 + 176{,}160{,}768 + 8{,}192 = 218{,}112{,}000
+   $$
+
+</Derivation>
+
+<Derivation title="Weights in the whole model" result="8,030,261,248 weights. That is the “8B” in the name, to the last digit.">
+
+1. 32 layers:
+
+   $$
+   32 \times 218{,}112{,}000 = 6{,}979{,}584{,}000
+   $$
+
+2. Embedding table, $128{,}256 \times 4096$:
+
+   $$
+   525{,}336{,}576
+   $$
+
+3. LM head, also $4096 \times 128{,}256$ (in the 8B model it is a separate matrix, not shared with the embedding):
+
+   $$
+   525{,}336{,}576
+   $$
+
+4. Final RMSNorm: $4{,}096$.
+
+5. Total:
+
+   $$
+   6{,}979{,}584{,}000 + 2 \times 525{,}336{,}576 + 4{,}096 = 8{,}030{,}261{,}248
+   $$
+
+</Derivation>
+
+<Figure n="4.5" title="Where the weights live" caption="In each layer, the MLP holds about 81% of the weights. Across the whole model, the 32 layers hold 87%, and the embedding table and LM head hold about 6.5% each.">
+  <TfpParamBars />
+</Figure>
+
+Two lessons from this count:
+
+- **The MLP is the heavy part.** About 4 out of every 5 weights in a layer are in the MLP. If you want to make a model smaller or faster, the MLP is where most of the bytes are.
+- **K and V are small because of GQA.** Without GQA, $W_K$ and $W_V$ would each be $4096 \times 4096$, and each layer would have about 25 M more weights. More important, the KV cache would be 4× bigger.
+
+<KeyNumbers
+  items={[
+    { value: '218 M', label: 'weights in one decoder layer' },
+    { value: '81%', label: 'of a layer’s weights are in the MLP' },
+    { value: '8.03 B', label: 'weights in total, counted by hand' },
+    { value: '128 KiB', label: 'of KV cache per token (BF16)' },
+  ]}
+/>
+
+## Counting the FLOPs for one token
+
+In Phase 1 we used the rule "**2 FLOPs per weight per token**". Now we can check it, and see where it is not exact.
+
+### The linear layers
+
+Every matrix multiplication of a row by a $a \times b$ matrix does $a \times b$ multiplies and about $a \times b$ additions. So it costs about $2ab$ FLOPs. Each weight is used once per token, with one multiply and one add.
+
+<Derivation title="FLOPs per token in the linear layers" result="About 15 GFLOPs per token for the matrix multiplications. The “2 × 8B = 16 GFLOPs” rule is close, but a little high.">
+
+1. One layer has 218 M weights, all used in matrix multiplications (ignore the tiny norms):
+
+   $$
+   2 \times 218 \times 10^{6} \approx 436 \text{ MFLOPs per layer}
+   $$
+
+2. 32 layers:
+
+   $$
+   32 \times 436 \times 10^{6} \approx 13.96 \text{ GFLOPs}
+   $$
+
+3. LM head ($4096 \times 128{,}256$):
+
+   $$
+   2 \times 525 \times 10^{6} \approx 1.05 \text{ GFLOPs}
+   $$
+
+4. The embedding is a lookup, so it costs **0 FLOPs**, even though it has 525 M weights.
+
+   $$
+   13.96 + 1.05 \approx 15.0 \text{ GFLOPs per token}
+   $$
+
+</Derivation>
+
+So the "2 × parameters" rule slightly overcounts, because it treats the embedding table like a matrix multiplication. For quick estimates it is still a good rule. For memory, though, the embedding counts fully: its 525 M weights must sit in GPU memory.
+
+### The attention part
+
+There is one more piece of work that the rule ignores completely: the attention math itself ($QK^\top$ and the multiplication by $V$). These are not weights. They are **activations times activations**, and their cost depends on **how many tokens are in the context**.
+
+<Derivation title="Attention FLOPs for one new token" result="Attention costs about 4 · d · n FLOPs per layer, where n is the number of tokens in the context. It grows with every token you add.">
+
+1. Let $n$ be the number of tokens the new token can see (the context length so far). For **one** query head, scoring against $n$ keys of 128 numbers costs:
+
+   $$
+   2 \times 128 \times n \text{ FLOPs}
+   $$
+
+2. There are 32 query heads. Note: GQA shares K and V, but each query head still does its own dot products, so GQA does **not** reduce FLOPs here:
+
+   $$
+   32 \times 2 \times 128 \times n = 2 \times 4096 \times n = 2dn
+   $$
+
+3. Multiplying the weights by the values costs the same again:
+
+   $$
+   2dn + 2dn = 4dn \text{ FLOPs per layer}
+   $$
+
+4. At $n = 8{,}192$ tokens:
+
+   $$
+   4 \times 4096 \times 8192 \approx 134 \text{ MFLOPs per layer}
+   $$
+
+   That is about 31% of the 436 MFLOPs of the linear layers.
+
+</Derivation>
+
+When does attention cost as much as all the matrix multiplications? Set them equal:
+
+$$
+4 d n = 2 \times 218 \times 10^{6} \quad\Rightarrow\quad n = \frac{436 \times 10^{6}}{4 \times 4096} \approx 26{,}600 \text{ tokens}
+$$
+
+So for short chats (a few thousand tokens), attention FLOPs are small and the "2 × parameters" rule works well. For long documents (tens of thousands of tokens), attention becomes a big part of the work. And, as we will see in the chapter on [prefill and decode](/inference-fundamentals/prefill-vs-decode), attention also has a memory problem: every new token must **read the KV cache** of all earlier tokens.
+
+<DeepDive title="Why RoPE makes attention depend only on distance">
+
+Take one pair of numbers from a query, written as an arrow $q$ in 2D, and one pair from a key, $k$. RoPE rotates the query of the token at position $m$ by an angle $m\theta$, and the key of the token at position $j$ by $j\theta$. A rotation by angle $\alpha$ is the matrix:
+
+$$
+R(\alpha) = \begin{pmatrix} \cos\alpha & -\sin\alpha \\ \sin\alpha & \cos\alpha \end{pmatrix}
+$$
+
+The score between them becomes:
+
+$$
+(R(m\theta)\, q) \cdot (R(j\theta)\, k) = q^\top R(m\theta)^\top R(j\theta)\, k = q^\top R\big((j - m)\theta\big)\, k
+$$
+
+The middle step uses two facts about rotations: $R(\alpha)^\top = R(-\alpha)$, and two rotations add their angles. The result depends only on $j - m$, the **distance** between the tokens. The absolute positions cancel out.
+
+Each of the 64 pairs in a 128-number head uses a different speed $\theta_i$. In Llama 3.1, $\theta_i = 500{,}000^{-2i/128}$, for $i = 0, 1, \ldots, 63$. The first pair turns by 1 radian per token (fast, good for "the next word"). The last pairs turn extremely slowly (good for "something 50,000 tokens ago"). Llama 3.1 also rescales the slowest speeds so the model works up to 128K tokens of context.
+
+</DeepDive>
+
+<DeepDive title="The same layer for Llama 3.1 70B">
+
+The 70B model uses the same recipe with bigger numbers: hidden size 8192, 80 layers, 64 query heads, 8 K/V heads (head size 128), MLP width 28,672.
+
+- Attention: $W_Q$ and $W_O$ are $8192 \times 8192$ (67.1 M each). $W_K$ and $W_V$ are $8192 \times 1024$ (8.4 M each). Total about 151 M.
+- MLP: $3 \times 8192 \times 28{,}672 \approx 704.6$ M.
+- One layer: about 856 M weights. Times 80 layers: about 68.5 B.
+- Embedding and LM head: $2 \times 128{,}256 \times 8192 \approx 2.1$ B.
+- Total: about **70.6 B**.
+
+Notice that the 70B model still has only 8 K/V heads. Its K and V are 1024 numbers per token per layer, the same as the 8B model. The KV cache per token is bigger only because there are 80 layers instead of 32: $2 \times 80 \times 1024 \times 2$ bytes = 320 KiB per token.
+
+</DeepDive>
+
+## Putting it together: one token, start to finish
+
+Let us follow the token " is" in "The capital of France is", during decode, through the whole model.
+
+1. **Lookup.** The embedding table gives one row of 4096 numbers.
+2. **32 times:** RMSNorm → make Q (4096), K (1024), V (1024) → rotate Q and K with RoPE → **save K and V in the KV cache** → attend to the K and V of all 5 tokens → mix the heads with $W_O$ → add back. Then RMSNorm → gate and up (14,336 each) → SiLU and multiply → down (4096) → add back.
+3. **Final RMSNorm** on the last row.
+4. **LM head**: 4096 × 128,256 → 128,256 logits.
+5. The **sampler** turns the logits into one chosen token, " Paris". That is the topic of the next chapter, [sampling](/inference-fundamentals/sampling).
+
+Every weight in steps 2 to 4 was read from GPU memory once for this token. That is why, as Phase 1 showed, decode is limited by memory bandwidth: about 16 GB read to produce a single word.
+
+## Check yourself
+
+<Quiz n={1} q="Why is W_K only 4096 × 1024 in Llama 3.1 8B, while W_Q is 4096 × 4096?">
+
+Because of grouped-query attention. There are 32 query heads but only 8 key heads, each of 128 numbers. So K has 8 × 128 = 1024 numbers per token, while Q has 32 × 128 = 4096.
+
+</Quiz>
+
+<Quiz n={2} q="What does the causal mask do, and why is it needed?">
+
+It sets the score to −∞ wherever a token would look at a future token, so after softmax that weight becomes 0. It is needed because the model generates text left to right: when it predicts a token, the future tokens do not exist yet, so it must learn to use only the past.
+
+</Quiz>
+
+<Quiz n={3} q="The embedding table has 525 M weights. How many FLOPs does it cost per token, and how much memory?">
+
+Almost 0 FLOPs, because it is just a lookup of one row. But it needs its full memory: 525 M × 2 bytes ≈ 1.05 GB in BF16.
+
+</Quiz>
+
+<Quiz n={4} q="Compute the attention FLOPs for one new token at a context of 32,768 tokens, per layer. Compare with the linear layers.">
+
+4 × 4096 × 32,768 ≈ 537 MFLOPs per layer. The linear layers cost about 436 MFLOPs per layer. So at 32K context, attention is already more work than all the matrix multiplications together (about 1.2×).
+
+</Quiz>
+
+<Quiz n={5} q="Which block holds most of the weights in a layer, and roughly what share?">
+
+The MLP block: about 176 M of 218 M weights, or about 81%.
+
+</Quiz>
+
+<Takeaways>
+
+- A forward pass is: **embedding lookup → 32 identical layers → final norm → LM head → logits**. Inside, each token is a row of **4096** numbers.
+- Each layer has an **attention block** (tokens share information) and an **MLP block** (each token is processed alone), each wrapped in **RMSNorm** and a **residual** add.
+- Attention is **softmax(QKᵀ / √d + mask) · V**. The causal mask stops tokens from seeing the future. K and V of past tokens are saved as the **KV cache**.
+- Llama 3.1 8B has **218 M weights per layer** (81% in the MLP) and **8.03 B** in total, which you can count from the config.
+- Linear layers cost about **2 FLOPs per weight per token** (about 15 GFLOPs). Attention adds **4 · d · n** per layer, which matters for long contexts (equal to the linear layers at about 26.6K tokens).
+
+</Takeaways>
