@@ -1,0 +1,38 @@
+---
+// Constrained decoding: a grammar masks tokens that would break the JSON.
+const cands = [
+  { t: '42', ok: true, p: '31%' },
+  { t: '3', ok: true, p: '12%' },
+  { t: '"forty', ok: false, p: '22%' },
+  { t: 'about', ok: false, p: '18%' },
+  { t: '1', ok: true, p: '9%' },
+  { t: 'null', ok: true, p: '4%' },
+];
+---
+<svg viewBox="0 0 720 230" role="img" aria-label="Constrained decoding: after the text {age: the grammar allows numbers and null but blocks tokens like forty in quotes and about; blocked tokens get a score of minus infinity">
+  <text x="20" y="24" class="t" font-size="12.5" font-weight="700">Output so far</text>
+  <rect x="20" y="34" width="250" height="40" rx="8" class="box2" />
+  <text x="36" y="59" class="t mono" font-size="14">{'{"age": '}<tspan class="ta">▌</tspan></text>
+  <text x="20" y="100" class="t2" font-size="11.5">Schema says: age must be</text>
+  <text x="20" y="118" class="t2" font-size="11.5">an integer (or null).</text>
+  <text x="20" y="150" class="t3" font-size="11">The grammar engine checks every</text>
+  <text x="20" y="166" class="t3" font-size="11">candidate token before sampling.</text>
+
+  <text x="320" y="24" class="t" font-size="12.5" font-weight="700">Candidate next tokens</text>
+  {cands.map((c, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const x = 320 + col * 196;
+    const y = 36 + row * 50;
+    return (
+      <g>
+        <rect x={x} y={y} width="184" height="40" rx="8" class={c.ok ? 'green' : 'red'} />
+        <text x={x + 14} y={y + 25} class="t mono" font-size="13" font-weight="600" text-decoration={c.ok ? '' : 'line-through'}>{c.t}</text>
+        <text x={x + 112} y={y + 25} class="t3 mono" font-size="11">{c.p}</text>
+        <text x={x + 170} y={y + 26} class={c.ok ? 'tg' : 'tr'} font-size="14" font-weight="700" text-anchor="end">{c.ok ? '✓' : '✗'}</text>
+      </g>
+    );
+  })}
+  <text x="320" y="206" class="t2" font-size="11.5">Blocked tokens get the score −∞, so their chance becomes exactly 0.</text>
+  <text x="320" y="222" class="t3" font-size="11">Chances are an example. The output is always valid JSON.</text>
+</svg>
