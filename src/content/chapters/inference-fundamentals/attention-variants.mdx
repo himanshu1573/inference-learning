@@ -1,0 +1,364 @@
+---
+title: 'Sharing Heads: MHA, MQA, GQA and MLA'
+description: 'How new models make the KV cache 4 to 70 times smaller by sharing or compressing keys and values, and what that means for memory, speed and quality.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import AvHeadSharing from '../../../components/figures/inference-fundamentals/AvHeadSharing.astro';
+import AvKvBars from '../../../components/figures/inference-fundamentals/AvKvBars.astro';
+import AvMla from '../../../components/figures/inference-fundamentals/AvMla.astro';
+import AvSlidingWindow from '../../../components/figures/inference-fundamentals/AvSlidingWindow.astro';
+
+In the [last chapter](/inference-fundamentals/kv-cache) we found a strange fact. **Llama 2 7B** is a smaller model than **Llama 3.1 8B**, but it needs **4 times more** KV cache per token: 512 KiB instead of 128 KiB. The difference is not in the size of the model. It is in **how the attention heads are organised**. This chapter explains the four main designs, from the oldest to the newest: MHA, MQA, GQA and MLA. Each one is a different answer to the same question: *how much do we really need to store for every token?*
+
+<NewWords
+  words={[
+    { word: 'Head', meaning: 'One independent part of attention, with its own query, key and value. A layer has many heads working side by side.' },
+    { word: 'Query head / KV head', meaning: 'A query head makes queries. A KV head makes the keys and values that get stored in the cache.' },
+    { word: 'MHA', meaning: 'Multi-head attention. Every query head has its own KV head. The original design.' },
+    { word: 'MQA', meaning: 'Multi-query attention. All query heads share one single KV head.' },
+    { word: 'GQA', meaning: 'Grouped-query attention. Query heads are split into groups, and each group shares one KV head.' },
+    { word: 'Group size', meaning: 'How many query heads share one KV head. Llama 3.1 8B: 32 ÷ 8 = 4.' },
+    { word: 'MLA', meaning: 'Multi-head latent attention. Keys and values are compressed into one small vector that is stored instead.' },
+    { word: 'Sliding window', meaning: 'A layer that only looks at the most recent W tokens, so its cache stops growing after W tokens.' },
+  ]}
+/>
+
+## Why attention has many heads
+
+In one layer, the model does not do attention just once. It does it many times in parallel, in independent **heads**. Each head has its own small query, key and value.
+
+Why? Because a token may need different kinds of information at the same time. One head might look for "which noun does this word belong to?", another for "what was said in the last sentence?", another for "where was this name first used?". Many heads let the model look for many things at once. (In practice, what each head learns is not so neat, but the idea is right.)
+
+In Llama 3.1 8B, the hidden vector of a token has **4,096** numbers. It is split into **32 heads** of **128** numbers each: $32 \times 128 = 4{,}096$.
+
+The question of this chapter is simple: **does every query head need its own key and value?** The keys and values are the part we must store in the cache. If several query heads could share them, we would store less.
+
+## MHA: every head has its own keys and values
+
+The original Transformer, from 2017, used **multi-head attention (MHA)**. Every query head has its own key head and its own value head. If there are 32 query heads, there are 32 key heads and 32 value heads, and all of them are cached.
+
+Llama 2 7B uses MHA. That is why its cache is so big:
+
+<Derivation title="KV cache of an MHA model: Llama 2 7B" result="512 KiB per token, and 2.15 GB for one sequence of 4,096 tokens (its maximum context).">
+
+1. Llama 2 7B: 32 layers, 32 query heads, and with MHA also **32 KV heads**, each of 128 numbers.
+
+   $$
+   2 \times 32 \times 32 \times 128 \times 2 = 524{,}288 \text{ bytes} = 512 \text{ KiB}
+   $$
+
+2. One sequence at its maximum context of 4,096 tokens:
+
+   $$
+   4{,}096 \times 524{,}288 \approx 2.15 \text{ GB}
+   $$
+
+</Derivation>
+
+MHA also has a speed problem. In the last chapter we measured the arithmetic intensity of attention in decode. For MHA, each cached key and value is used by **exactly one** query head. So for every byte we read, we do very little math: about **1 FLOP per byte**. That is about 300 times below the H100 ridge point. Attention in an MHA model spends almost all of its time waiting for memory.
+
+## MQA: one key and value for everybody
+
+In 2019, Noam Shazeer proposed a radical idea called **multi-query attention (MQA)**: keep many query heads, but let **all of them share one single key head and one single value head**.
+
+The queries are still different, so each head still asks its own question. But all heads compare their questions with the **same keys**, and take information from the **same values**.
+
+<Derivation title="KV cache with MQA, for a model shaped like Llama 3.1 8B" result="16 KiB per token: 32 times smaller than MHA with 32 heads.">
+
+1. Same shape (32 layers, 128 numbers per head), but only **1 KV head**:
+
+   $$
+   2 \times 32 \times 1 \times 128 \times 2 = 16{,}384 \text{ bytes} = 16 \text{ KiB}
+   $$
+
+2. Compared with MHA (32 KV heads):
+
+   $$
+   \frac{512 \text{ KiB}}{16 \text{ KiB}} = 32 \times \text{ smaller}
+   $$
+
+3. Arithmetic intensity of decode attention: each cached key and value is now used by **all 32** query heads, so the intensity grows from about 1 to about **32 FLOPs per byte**.
+
+</Derivation>
+
+MQA makes the cache tiny and decode attention much faster. Models like PaLM, Falcon-7B and StarCoder used it. But it has costs:
+
+- **Quality.** With only one key and value, the model has less freedom. Researchers found that MQA models can be a little worse than MHA models, and training can be less stable.
+- **Splitting across GPUs.** With tensor parallelism, each GPU handles some of the heads (we saw this in [chapter 1.7](/gpu-hardware/connecting-gpus)). With MHA, 32 KV heads split nicely over 2, 4 or 8 GPUs. With MQA there is only **one** KV head, so it cannot be split: **every GPU must keep a full copy** of the cache. On 8 GPUs, the memory saving per GPU is mostly gone.
+
+## GQA: the middle path
+
+In 2023, a team at Google proposed **grouped-query attention (GQA)**. It sits between MHA and MQA. The query heads are split into **groups**, and each group shares **one** KV head.
+
+<Figure n="8.1" title="Three ways to connect query heads to key-value heads" caption="Drawn with 8 query heads. In MHA (left), each query head has its own K and V. In GQA (middle), groups of 4 query heads share one K and V. In MQA (right), all query heads share a single K and V. The cache stores only the K and V boxes, so GQA stores 4× less than MHA here, and MQA 8× less.">
+  <AvHeadSharing />
+</Figure>
+
+The whole Llama 3 family uses GQA with **8 KV heads**, at every size:
+
+| Model | Query heads | KV heads | Group size | KV per token (BF16) |
+| --- | --- | --- | --- | --- |
+| Llama 3.1 8B | 32 | 8 | <span class="num">4</span> | <span class="num">128 KiB</span> |
+| Llama 3.1 70B | 64 | 8 | <span class="num">8</span> | <span class="num">320 KiB</span> |
+| Llama 3.1 405B | 128 | 8 | <span class="num">16</span> | <span class="num">504 KiB</span> |
+
+<Derivation title="How much does GQA save, and how much faster is decode attention?" result="The cache shrinks by the group size g, and the intensity of decode attention grows to about g FLOPs per byte.">
+
+1. The saving compared with MHA is the ratio of query heads to KV heads, the **group size**:
+
+   $$
+   g = \frac{H_q}{H_{kv}}
+   $$
+
+2. For Llama 3.1 8B: $g = 32 \div 8 = 4$. If it used MHA, its cache would be $4 \times 128 = 512$ KiB per token, just like Llama 2 7B. GQA cuts it to 128 KiB.
+
+3. For Llama 3.1 70B: $g = 64 \div 8 = 8$. With MHA it would need $8 \times 320 = 2{,}560$ KiB (2.5 MiB) per token. GQA cuts it to 320 KiB.
+
+4. In decode, each cached key and value is now used by $g$ query heads, so the intensity of attention is about $g$ FLOPs per byte: **4** for the 8B model, **8** for the 70B, **16** for the 405B. Still memory-bound, but 4 to 16 times better than MHA.
+
+</Derivation>
+
+GQA has become the standard for open models. It gives most of the memory saving of MQA, while quality stays very close to MHA. The GQA paper also showed that an existing MHA model can be **converted** to GQA: average the key and value heads inside each group, then train a little more, using only about 5% of the original training compute.
+
+GQA is also friendly to tensor parallelism. Llama 3.1 has 8 KV heads, so on up to 8 GPUs each GPU stores only its own share of the heads: no copies needed.
+
+<Callout type="real" title="8 KV heads and 8 GPUs">
+
+It is no accident that many models have exactly 8 KV heads, and that a typical GPU server has exactly 8 GPUs connected by NVLink. With tensor parallelism of 8, each GPU gets exactly one KV head, and the KV cache is split perfectly. If you use more GPUs than KV heads (for example 16), the KV heads must be **copied**, and each GPU stores more than its fair share.
+
+</Callout>
+
+## MLA: store a compressed summary instead
+
+In 2024, the DeepSeek team introduced a different idea in DeepSeek-V2, and used it again in **DeepSeek-V3**: **multi-head latent attention (MLA)**. Instead of sharing heads, MLA **compresses** the keys and values.
+
+<Callout type="analogy" title="Store the recipe, not the cooked dishes">
+
+Imagine a restaurant that must remember 128 dishes for every customer. MHA keeps all 128 cooked dishes in the fridge. GQA keeps fewer dishes and lets some customers share. MLA keeps **one small recipe card** per customer. When a dish is needed, it can be made again from the card. The card is much smaller than the dishes.
+
+</Callout>
+
+Here is how it works in DeepSeek-V3:
+
+1. The hidden vector of a token (7,168 numbers) is multiplied by a small matrix that **compresses** it into a **latent vector** $c$ of only **512 numbers**.
+2. Only this latent vector is stored in the cache.
+3. When attention needs keys and values, they are **rebuilt** from the latent by two other matrices: keys and values for all **128 heads**.
+
+There is one complication: **position**. Llama-style models add position information to keys with RoPE (a rotation that depends on the token's position; see [chapter 2.3](/inference-fundamentals/embeddings)). This rotation does not mix well with the compression trick (the Deep dive below explains why). So MLA keeps a small extra key of **64 numbers** that carries the position information. It is shared by all heads and stored next to the latent.
+
+<Figure n="8.2" title="Multi-head latent attention in DeepSeek-V3" caption="For each token and layer, MLA stores only a 512-number latent plus a 64-number position key: 576 numbers. The keys and values for the 128 heads are never stored; they are rebuilt from the latent, or the rebuilding is folded into the query side so it is never needed at all.">
+  <AvMla />
+</Figure>
+
+<Derivation title="KV cache per token for DeepSeek-V3 (BF16)" result="About 68.6 KiB per token: less than a quarter of Llama 3.1 70B, for a model almost 10 times bigger.">
+
+1. Numbers stored per token per layer: latent plus position key.
+
+   $$
+   512 + 64 = 576
+   $$
+
+2. DeepSeek-V3 has 61 layers, and we store each number in 2 bytes:
+
+   $$
+   576 \times 61 \times 2 = 70{,}272 \text{ bytes} \approx 68.6 \text{ KiB}
+   $$
+
+3. What normal MHA would need with the same 128 heads (each key is $128 + 64 = 192$ numbers, each value 128):
+
+   $$
+   128 \times (192 + 128) = 40{,}960 \text{ numbers per layer}
+   $$
+
+4. Compare: $40{,}960 \div 576 \approx 71$. MLA stores about **71 times less** than MHA would.
+
+</Derivation>
+
+The DeepSeek-V2 paper reported a KV cache **93.3% smaller** than their earlier 67B model, and up to **5.76 times** higher maximum generation throughput. DeepSeek also reported that MLA kept the quality of MHA, or was even a little better, in their experiments. The cost is extra math, to compress and rebuild, and more complex attention kernels.
+
+<Figure n="8.3" title="KV cache per token for five designs" caption="All in BF16. MHA (Llama 2 7B) stores the most. GQA (Llama 3.1) cuts it by the group size. MLA (DeepSeek-V3) stores less than a GQA model ten times smaller. A pure MQA model stores the least, but with costs in quality and multi-GPU memory.">
+  <AvKvBars />
+</Figure>
+
+<DeepDive title="The absorption trick: why MLA never rebuilds the keys">
+
+If MLA rebuilt the full keys and values from the latent for every cached token in every step, it would do a lot of extra work. It does not need to. Let us see why, using simple algebra.
+
+For one head, the key of a cached token is the latent multiplied by an "up" matrix:
+
+$$
+k = W_{UK} \, c
+$$
+
+The attention score is the dot product of the query $q$ with this key:
+
+$$
+q^{\top} k = q^{\top} (W_{UK} \, c) = (W_{UK}^{\top} q)^{\top} c
+$$
+
+The two forms give exactly the same number. But the right side has a big advantage: we compute $q' = W_{UK}^{\top} q$ **once** for the new token (a 512-number vector), and then take its dot product directly with every cached latent $c$. We never build any key at all. The matrix $W_{UK}$ has been **absorbed** into the query.
+
+The same works for values. The output of a head is a weighted sum of values:
+
+$$
+o = \sum_t p_t \, v_t = \sum_t p_t \, W_{UV} \, c_t = W_{UV} \Big( \sum_t p_t \, c_t \Big)
+$$
+
+So we first mix the cached latents with the attention weights $p_t$, and multiply by $W_{UV}$ only **once** at the end (and this matrix can even be folded into the output projection).
+
+After absorption, all 128 heads read the **same** 576 cached numbers per token. It looks like MQA with one big shared head. This gives MLA a very high arithmetic intensity in decode. Per cached token and layer we read $576 \times 2 = 1{,}152$ bytes. Each of the 128 heads does a dot product over 576 numbers ($2 \times 576$ FLOPs) and mixes 512 numbers ($2 \times 512$ FLOPs):
+
+$$
+\frac{128 \times (1{,}152 + 1{,}024)}{1{,}152} \approx 240 \text{ FLOPs per byte}
+$$
+
+That is close to the H100 ridge point of about 295. MLA decode attention is much closer to compute-bound than GQA, which needs special kernels (DeepSeek released one, called FlashMLA, in 2025).
+
+**Why RoPE needs separate numbers.** RoPE rotates the query and the key by angles that depend on their positions. The score becomes $q^{\top} R \, W_{UK} \, c$, where the rotation $R$ depends on the distance between the two tokens. A matrix that changes for every pair of tokens cannot be folded into the query once. So MLA keeps the position part out of the compression: a small 64-number key with RoPE, shared by all heads.
+
+</DeepDive>
+
+<Callout type="real" title="MLA and multiple GPUs">
+
+After absorption, all heads share the same latent. If you split the heads over 8 GPUs with tensor parallelism, every GPU needs the **whole** latent cache. This is like the MQA problem. For this reason, engines that serve DeepSeek models often split the **attention** part by requests instead of by heads (data parallelism for attention), and use other kinds of parallelism for the rest of the model. Phase 3 covers these layouts.
+
+</Callout>
+
+## Sliding windows: only look at recent tokens
+
+All the designs so far reduce the size **per token**. Another idea reduces the **number of tokens** kept in the cache.
+
+In **sliding-window attention**, a layer only looks at the most recent $W$ tokens, not at all of them. Older tokens fall out of the window, so their keys and values are no longer needed. The cache of that layer stops growing at $W$ tokens and works like a **rolling buffer**: the newest token overwrites the oldest.
+
+<Figure n="8.4" title="Full attention vs a sliding window" caption="Each row is a query token, each column a key token. With full causal attention (left), token 10 looks at all 10 tokens, so the cache must keep every token. With a sliding window of 4 (right), each token looks only at its last 4 tokens, so the cache keeps only 4 tokens per layer.">
+  <AvSlidingWindow />
+</Figure>
+
+The first version of **Mistral 7B** used a window of 4,096 tokens in every layer. Its KV cache per token is the same as Llama 3.1 8B (32 layers, 8 KV heads of 128), so:
+
+$$
+4{,}096 \times 128 \text{ KiB} = 512 \text{ MiB per sequence, at most}
+$$
+
+no matter how long the conversation becomes.
+
+But does the model then forget everything older than 4,096 tokens? Not completely. Information can travel through the layers: layer 2 looks at tokens that already looked at earlier tokens in layer 1, and so on. In theory, after 32 layers, information can come from about $4{,}096 \times 32 \approx 131{,}000$ tokens back. In practice, details from far away get weaker.
+
+Newer models often **mix** the two kinds of layers. For example, Gemma 3 uses five sliding-window layers (window of 1,024 tokens) for every one full-attention layer.
+
+<Derivation title="Cache saving from mixing local and global layers (5 : 1, window 1,024, context 128K)" result="About 5.8 times less KV cache than using full attention in every layer.">
+
+1. With full attention everywhere, every layer stores all $131{,}072$ tokens. Call that 1 unit per layer.
+
+2. With the 5 : 1 mix, one layer in six stores all tokens, and five in six store only 1,024:
+
+   $$
+   \frac{1}{6} \times 131{,}072 + \frac{5}{6} \times 1{,}024 \approx 21{,}845 + 853 = 22{,}698 \text{ tokens per layer on average}
+   $$
+
+3. Compare with 131,072 tokens per layer:
+
+   $$
+   \frac{131{,}072}{22{,}698} \approx 5.8
+   $$
+
+</Derivation>
+
+## Putting it all together
+
+| Design | Example | What is stored per layer | KV per token (BF16) | Decode attention intensity |
+| --- | --- | --- | --- | --- |
+| MHA | Llama 2 7B | 32 K heads + 32 V heads | <span class="num">512 KiB</span> | about <span class="num">1</span> |
+| GQA | Llama 3.1 8B | 8 K heads + 8 V heads | <span class="num">128 KiB</span> | about <span class="num">4</span> |
+| MQA | (8B shape, 1 KV head) | 1 K head + 1 V head | <span class="num">16 KiB</span> | about <span class="num">32</span> |
+| MLA | DeepSeek-V3 | one 576-number latent | <span class="num">68.6 KiB</span> | about <span class="num">240</span> |
+| Sliding window | Mistral 7B (v0.1) | like GQA, but only the last 4,096 tokens | <span class="num">128 KiB</span>, capped | about <span class="num">4</span> |
+
+<KeyNumbers
+  items={[
+    { value: '4×', label: 'GQA saving in Llama 3.1 8B (32 ÷ 8)' },
+    { value: '16×', label: 'GQA saving in Llama 3.1 405B (128 ÷ 8)' },
+    { value: '576', label: 'numbers per token per layer in MLA' },
+    { value: '~71×', label: 'MLA saving vs MHA for DeepSeek-V3' },
+  ]}
+/>
+
+### What this means for a serving engineer
+
+These designs are chosen when a model is **trained**. As a serving engineer, you cannot switch a model from MHA to GQA with a setting. But you must always know which design your model uses, because it changes:
+
+- **Memory.** How many users and how much context fit on your GPUs.
+- **Speed.** How many bytes each decode step reads.
+- **Parallelism.** How the KV cache splits across GPUs (MQA and MLA do not split by heads).
+- **Kernels.** Your engine needs an attention kernel that supports the design (GQA everywhere, MLA and sliding windows only in newer engines).
+
+The answer is in the model's `config.json` file. For Llama 3.1 8B you find, among other things:
+
+```json
+{
+  "hidden_size": 4096,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "num_hidden_layers": 32
+}
+```
+
+The head size is `hidden_size / num_attention_heads` $= 4{,}096 \div 32 = 128$ (some configs also list it directly as `head_dim`). So the KV cache per token is $2 \times 32 \times 8 \times 128 \times 2 = 131{,}072$ bytes. If `num_key_value_heads` equals `num_attention_heads`, the model uses MHA. If it is 1, it is MQA. Fields like `sliding_window` or `kv_lora_rank` tell you about sliding windows and MLA.
+
+<Callout type="warning">
+
+Do not assume that a bigger model has a bigger KV cache per token. DeepSeek-V3 (671B parameters) stores less per token than Llama 3.1 8B. Always calculate from the config.
+
+</Callout>
+
+## Check yourself
+
+<Quiz n={1} q="A model has 40 query heads and 8 KV heads. What is its group size, and how many times smaller is its cache than an MHA version of the same model?">
+
+The group size is $40 \div 8 = 5$. Each KV head is shared by 5 query heads, so the cache is 5 times smaller than with MHA (40 KV heads).
+
+</Quiz>
+
+<Quiz n={2} q="Why does MQA lose much of its memory saving when the model is split over 8 GPUs with tensor parallelism?">
+
+Tensor parallelism splits the heads across GPUs. With only one KV head, there is nothing to split, so every GPU must keep a full copy of the whole KV cache. With GQA and 8 KV heads, each GPU stores only one head.
+
+</Quiz>
+
+<Quiz n={3} q="What does MLA store in the cache instead of keys and values, and how big is it for DeepSeek-V3?">
+
+A compressed latent vector of 512 numbers plus a small 64-number position key (for RoPE), per token per layer: 576 numbers. With 61 layers in BF16, that is $576 \times 61 \times 2 = 70{,}272$ bytes, about 68.6 KiB per token.
+
+</Quiz>
+
+<Quiz n={4} q="With the absorption trick, why does MLA not need to rebuild the keys of old tokens?">
+
+Because $q^{\top}(W_{UK} c) = (W_{UK}^{\top} q)^{\top} c$. We multiply the new query by $W_{UK}^{\top}$ once, and then compare it directly with the stored latents. The keys are never built.
+
+</Quiz>
+
+<Quiz n={5} q="A sliding-window layer has a window of 4,096 tokens. The conversation is 50,000 tokens long. How many tokens does this layer keep in its cache?">
+
+Only the last 4,096 tokens. Older tokens are outside the window and are never looked at again by this layer, so their keys and values can be dropped (the buffer rolls over).
+
+</Quiz>
+
+<Takeaways>
+
+- The KV cache stores the keys and values of every **KV head**. Fewer KV heads means a smaller cache.
+- **MHA**: one KV head per query head. Biggest cache, decode intensity about 1. Example: Llama 2 7B, 512 KiB per token.
+- **MQA**: one KV head for all. Tiny cache, but some quality loss, and it cannot be split across GPUs by heads.
+- **GQA**: groups of query heads share a KV head. The cache shrinks by the **group size** $g$ and decode intensity grows to about $g$. Llama 3.1 uses 8 KV heads at every size.
+- **MLA** (DeepSeek-V3) stores a compressed 576-number latent per layer, about 71× less than MHA. With the absorption trick, decode attention gets close to compute-bound.
+- **Sliding windows** cap how many tokens a layer keeps. Mixing local and global layers saves a lot at long context.
+- Always read `config.json` to know which design your model uses.
+
+</Takeaways>
