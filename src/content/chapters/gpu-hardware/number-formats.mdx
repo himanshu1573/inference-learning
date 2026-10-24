@@ -1,0 +1,456 @@
+---
+title: 'Number Formats: FP32 to FP4'
+description: 'How a computer stores a number in bits, why there are so many formats, and why smaller numbers make LLM inference faster and cheaper.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import NfBitsBytes from '../../../components/figures/gpu-hardware/NfBitsBytes.astro';
+import NfBitLayouts from '../../../components/figures/gpu-hardware/NfBitLayouts.astro';
+import NfDecodeFp16 from '../../../components/figures/gpu-hardware/NfDecodeFp16.astro';
+import NfRangePrecision from '../../../components/figures/gpu-hardware/NfRangePrecision.astro';
+import NfBlockScaling from '../../../components/figures/gpu-hardware/NfBlockScaling.astro';
+import NfModelSizes from '../../../components/figures/gpu-hardware/NfModelSizes.astro';
+
+In chapter 1.1 we said that Llama 3.1 8B needs **16 GB**, because each of its 8 billion numbers takes **2 bytes**. But why 2 bytes? Why not 4, or 1, or half a byte? This choice is one of the most powerful tools in LLM inference. If you store each number in fewer bits, the model gets smaller, it fits on fewer GPUs, and it runs faster. In this chapter, we learn how numbers are stored, what all the names (FP32, BF16, FP8, FP4...) mean, and what you give up when you make numbers smaller.
+
+<NewWords
+  words={[
+    { word: 'Bit', meaning: 'The smallest piece of computer data. It is either 0 or 1.' },
+    { word: 'Byte', meaning: 'A group of 8 bits. Memory sizes (GB) are counted in bytes.' },
+    { word: 'Integer', meaning: 'A whole number with no fraction part, like 7 or −120.' },
+    { word: 'Floating point (FP)', meaning: 'A way to store numbers with a fraction part, using a sign, an exponent and a mantissa.' },
+    { word: 'Exponent', meaning: 'The part of a floating-point number that says how big or small it is (its "zoom level").' },
+    { word: 'Mantissa', meaning: 'The part of a floating-point number that holds its digits. More mantissa bits means more precise numbers.' },
+    { word: 'Range', meaning: 'How big (and how small) the numbers in a format can be.' },
+    { word: 'Precision', meaning: 'How close together the numbers in a format are. High precision means small rounding errors.' },
+    { word: 'Quantization', meaning: 'Converting a model to a smaller number format, for example from BF16 to FP8.' },
+    { word: 'Scale factor', meaning: 'An extra number used to stretch small-format values back to their real size.' },
+  ]}
+/>
+
+## Bits and bytes from zero
+
+Computers store everything as **bits**. A bit is like a light switch: it is either **off (0)** or **on (1)**. One bit alone can only say two things. But a group of bits can say much more.
+
+- 1 bit has 2 patterns: `0`, `1`.
+- 2 bits have 4 patterns: `00`, `01`, `10`, `11`.
+- 3 bits have 8 patterns.
+- Every extra bit **doubles** the number of patterns. So $n$ bits have $2^n$ patterns.
+
+A group of **8 bits** is called a **byte**. One byte has $2^8 = 256$ different patterns. When we say a GPU has 80 GB of memory, we mean 80 billion bytes, which is 640 billion bits.
+
+How does a pattern of bits become a number? Each position has a **place value**, just like in normal numbers (ones, tens, hundreds). But in binary, each place is worth **2 times** the place on its right: 1, 2, 4, 8, 16, 32, 64, 128.
+
+<Figure n="6.1" title="Eight bits make one byte" caption="To read a binary number, add up the place values of the positions that hold a 1. The pattern 01001101 means 64 + 8 + 4 + 1 = 77. One byte can hold 256 different patterns, so it can store the whole numbers from 0 to 255.">
+  <NfBitsBytes />
+</Figure>
+
+<Callout type="idea">
+
+**Fewer bits per number means fewer bytes in memory.** A model with 8 billion numbers takes 32 GB with 4 bytes per number, 16 GB with 2 bytes, 8 GB with 1 byte, and 4 GB with half a byte. Everything in this chapter comes back to this simple fact.
+
+</Callout>
+
+## Integers: simple, but not enough
+
+The easiest way to store a number is as an **integer** (a whole number). The format **INT8** uses 8 bits. One bit pattern is used to show negative numbers, so INT8 can store the numbers from **−128 to 127**. **INT4** uses 4 bits and can store only **−8 to 7**: just 16 different values.
+
+Integers are fast and simple for the hardware. But they have two big problems for neural networks:
+
+1. **No fractions.** The weights of an LLM are mostly small numbers like `0.0123` or `−0.0871`. An integer cannot hold `0.0123`.
+2. **Small, fixed range.** Some numbers inside the model are tiny (0.0001) and some are large (500). INT8 cannot hold both at once.
+
+We can still use integers for LLMs, with a trick called a **scale factor** that we will see later in this chapter. But first, let us look at the format computers normally use for real numbers: **floating point**.
+
+## Floating point: scientific notation in binary
+
+You may know **scientific notation** from school. Instead of writing 6,500,000, a scientist writes:
+
+$$
+6{,}500{,}000 = 6.5 \times 10^{6}
+$$
+
+This has two parts: the **digits** (6.5) and the **size** ($10^6$). The size part lets you write very big and very small numbers with only a few digits. A computer does the same thing, but with powers of **2** instead of powers of 10. For example:
+
+$$
+-6.5 = -1.625 \times 2^{2}
+$$
+
+So a floating-point number is stored in **three parts**:
+
+1. **Sign** (1 bit): 0 means positive, 1 means negative.
+2. **Exponent** (a few bits): the power of 2. It sets how **big or small** the number is.
+3. **Mantissa** (the remaining bits): the digits after "1.". It sets how **precise** the number is.
+
+<Callout type="analogy" title="A ruler and a zoom level">
+
+Think of the **exponent** as choosing a ruler: a 1 cm ruler, a 1 m ruler or a 1 km ruler. Think of the **mantissa** as the marks on that ruler. With few marks, you can only say "about here". With many marks, you can measure exactly. A big exponent range lets you measure both ants and mountains. Many mantissa bits let you measure each one very exactly.
+
+</Callout>
+
+The exact rule to turn the bits back into a number is:
+
+$$
+\text{value} = (-1)^{\text{sign}} \times 2^{\,(\text{exponent} - \text{bias})} \times \left(1 + \frac{\text{mantissa}}{2^{M}}\right)
+$$
+
+Here $M$ is the number of mantissa bits. The **bias** is a fixed number for each format (15 for FP16, 127 for FP32 and BF16). The bias lets the exponent be negative without needing its own sign bit: the stored exponent is always positive, and we subtract the bias to get the real power of 2. The "1 +" is there because, in binary scientific notation, the first digit is always 1, so the computer does not waste a bit storing it.
+
+## Decoding an FP16 number, step by step
+
+Let us read one real **FP16** number. FP16 has 16 bits: **1 sign bit, 5 exponent bits and 10 mantissa bits**, and its bias is 15. The bits are: `1 10001 1010000000`.
+
+<Figure n="6.2" title="Reading the FP16 bits 1 10001 1010000000" caption="The sign bit says the number is negative. The exponent bits 10001 mean 17; after we subtract the bias of 15, we get 2, which means 'times 2² = 4'. The mantissa bits mean 1.625. Together: −1 × 4 × 1.625 = −6.5.">
+  <NfDecodeFp16 />
+</Figure>
+
+<Derivation title="Decode the FP16 pattern 1 10001 1010000000" result="The 16 bits store exactly −6.5.">
+
+1. **Sign.** The first bit is 1, so the number is negative.
+
+   $$
+   (-1)^{1} = -1
+   $$
+
+2. **Exponent.** The next 5 bits are `10001`. Read them as a binary integer: $16 + 1 = 17$. Subtract the FP16 bias of 15.
+
+   $$
+   17 - 15 = 2 \quad\Rightarrow\quad 2^{2} = 4
+   $$
+
+3. **Mantissa.** The last 10 bits are `1010000000`. Put "1." in front: `1.1010000000`. After the point, the places are worth ½, ¼, ⅛, ... Only the 1st and 3rd places hold a 1.
+
+   $$
+   1 + \tfrac{1}{2} + \tfrac{1}{8} = 1.625
+   $$
+
+4. **Multiply the three parts.**
+
+   $$
+   -1 \times 4 \times 1.625 = -6.5
+   $$
+
+</Derivation>
+
+You can check the other direction too. Start with −6.5, divide by 4 to get 1.625 (between 1 and 2, good), so the exponent is 2. Store 2 + 15 = 17 as `10001`. Store 0.625 = ½ + ⅛ as `101` followed by zeros. That is how a computer **encodes** a number.
+
+<Callout type="note">
+
+Most numbers cannot be stored exactly. For example, 0.1 in binary is a never-ending pattern (like 1/3 = 0.333... in decimal). The computer stores the **closest** value it can, and the small difference is called the **rounding error**. Fewer mantissa bits means bigger rounding errors.
+
+</Callout>
+
+## The family of formats
+
+Every format uses the same idea: sign + exponent + mantissa. They only differ in **how many bits** go to each part. Here are the formats you will meet in LLM inference, drawn to the same scale:
+
+<Figure n="6.3" title="Bit layouts of the common formats" caption="Each small box is one bit. Red is the sign, blue is the exponent, green is the mantissa. Notice that BF16 keeps all 8 exponent bits of FP32 and cuts the mantissa, while FP16 cuts both. FP8 comes in two versions: E4M3 (4 exponent bits, 3 mantissa bits) and E5M2.">
+  <NfBitLayouts />
+</Figure>
+
+The names tell you the layout. **E4M3** means 4 exponent bits and 3 mantissa bits (plus 1 sign bit, for 8 bits in total). **E2M1** means 2 exponent bits and 1 mantissa bit (4 bits in total).
+
+| Format | Sign / exp / mantissa | Bytes | Biggest value | Main use in LLMs |
+| --- | --- | --- | --- | --- |
+| FP32 | 1 / 8 / 23 | <span class="num">4</span> | $3.4 \times 10^{38}$ | Training "master" copy, some sensitive steps |
+| BF16 | 1 / 8 / 7 | <span class="num">2</span> | $3.4 \times 10^{38}$ | **Default** for training and serving |
+| FP16 | 1 / 5 / 10 | <span class="num">2</span> | 65,504 | Older models and GPUs |
+| FP8 E4M3 | 1 / 4 / 3 | <span class="num">1</span> | 448 | Weights and activations in FP8 serving |
+| FP8 E5M2 | 1 / 5 / 2 | <span class="num">1</span> | 57,344 | Gradients in training, some KV caches |
+| INT8 | integer | <span class="num">1</span> | 127 | Quantized weights (with scales) |
+| INT4 | integer | <span class="num">0.5</span> | 7 | Quantized weights (with scales) |
+| FP4 E2M1 | 1 / 2 / 1 | <span class="num">0.5</span> | 6 | Newest GPUs (Blackwell), with block scales |
+
+## Range vs precision: the big trade
+
+Each format has a fixed **bit budget**. You must decide how to spend it:
+
+- Spend more bits on the **exponent** → bigger **range** (you can store very big and very small numbers).
+- Spend more bits on the **mantissa** → finer **precision** (smaller gaps between the numbers you can store).
+
+A good way to see precision is to count how many different values a format has **between 1 and 2**. With $M$ mantissa bits, there are $2^M$ steps. FP32 has $2^{23}$, more than 8 million steps. FP4 E2M1 has only $2^1 = 2$: it can store 1 and 1.5, and nothing in between.
+
+<Figure n="6.4" title="Range and precision of each format" caption="Left: the biggest number each format can store, on a log scale (each step on the axis is ×10). Right: how many different values fit between 1 and 2. FP32 and BF16 have the same huge range, but BF16 has far fewer steps. FP4 has a tiny range (up to 6) and only 2 steps.">
+  <NfRangePrecision />
+</Figure>
+
+## Why BF16 became the default
+
+FP16 and BF16 both use 16 bits. FP16 is more **precise** (10 mantissa bits vs 7). So why does almost every modern LLM use BF16?
+
+The answer is **range**. The biggest FP16 number is only 65,504. During training, and sometimes during inference, some values inside the network become larger than that. In FP16, such a value becomes **infinity**, and then the math breaks (you get "NaN", which means "not a number"). Training in FP16 needs extra tricks to avoid this.
+
+BF16 ("brain float 16", created at Google Brain) has the **same 8 exponent bits as FP32**, so it has the same huge range. It gives up precision instead. For neural networks, this turned out to be the right trade: the networks do not mind small rounding errors, but they break with overflows.
+
+<Callout type="example" title="70,000 in FP16 and BF16">
+
+Try to store 70,000. In **FP16**, it is bigger than 65,504, so it becomes **infinity**. In **BF16**, it is stored as **70,144**, the closest BF16 value. The answer is a little wrong (0.2% off), but it is a real number, so the computation continues safely.
+
+</Callout>
+
+BF16 has one more nice feature: it is simply **the top 16 bits of an FP32 number**. To convert FP32 to BF16, the hardware just cuts off the last 16 bits (and rounds). This makes it cheap to move between the two formats.
+
+<Callout type="real">
+
+Models like Llama 3.1, Qwen and Mistral are released with their weights in BF16. When you serve them with no changes, you use BF16, which is why we used 2 bytes per parameter in chapter 1.1. Serving engines like vLLM call this the default "dtype" (data type).
+
+</Callout>
+
+## FP8 and FP4: tiny numbers need a scale
+
+Now look at the small formats. FP8 E4M3 can only store numbers up to **448**, and FP4 E2M1 only up to **6**. FP4 is so small that we can write down **every** value it can hold:
+
+| Bits (no sign) | Value | Bits (no sign) | Value |
+| --- | --- | --- | --- |
+| `000` | <span class="num">0</span> | `100` | <span class="num">2</span> |
+| `001` | <span class="num">0.5</span> | `101` | <span class="num">3</span> |
+| `010` | <span class="num">1</span> | `110` | <span class="num">4</span> |
+| `011` | <span class="num">1.5</span> | `111` | <span class="num">6</span> |
+
+With the sign bit, FP4 has these 8 values and their negatives. That is all! So how can a model with weights like 0.0123 and −0.0871 use such a format?
+
+The answer is a **scale factor**. We store one extra, more precise number (the scale) for a **group** of values. Each small value is the real value **divided by the scale**. To use it, we multiply back.
+
+$$
+\text{real value} \approx \text{small value} \times \text{scale}
+$$
+
+<Derivation title="Store four weights in FP4 with one shared scale" result="Each weight costs 4 bits; the group shares one scale. The error is small (here at most 0.05).">
+
+1. Start with four weights from one group.
+
+   $$
+   [\,0.9,\; -0.3,\; 0.5,\; 1.8\,]
+   $$
+
+2. Find the biggest absolute value: 1.8. Choose the scale so that 1.8 becomes the biggest FP4 value, 6.
+
+   $$
+   \text{scale} = \frac{1.8}{6} = 0.3
+   $$
+
+3. Divide each weight by the scale.
+
+   $$
+   [\,3,\; -1,\; 1.667,\; 6\,]
+   $$
+
+4. Round to the nearest FP4 value. 3, −1 and 6 exist in FP4. 1.667 is not in the table, so it becomes 1.5.
+
+   $$
+   [\,3,\; -1,\; 1.5,\; 6\,]
+   $$
+
+5. To use the weights, multiply back by the scale.
+
+   $$
+   [\,0.9,\; -0.3,\; 0.45,\; 1.8\,]
+   $$
+
+   Three weights are exact. The third one moved from 0.5 to 0.45. This is the **quantization error**.
+
+</Derivation>
+
+### How big should a group be?
+
+Which values share one scale? There are three common choices:
+
+<Figure n="6.5" title="Per-tensor, per-channel and per-block scaling" caption="Per-tensor uses one scale for a whole matrix, so one very large value forces a big scale and makes all the small values lose precision. Per-channel gives each row its own scale. Per-block gives each small block of values its own scale. FP4 formats use small blocks.">
+  <NfBlockScaling />
+</Figure>
+
+- **Per-tensor:** one scale for the whole matrix. Very cheap, often good enough for FP8.
+- **Per-channel:** one scale for each row (or column). Common for INT8 and INT4 weights.
+- **Per-block:** one scale for each small block of values. This is what makes FP4 usable. Two standard versions exist:
+  - **MXFP4** (an open standard from the OCP group): blocks of **32** values share one 8-bit scale that is a power of 2.
+  - **NVFP4** (from NVIDIA, for Blackwell GPUs): blocks of **16** values share one **FP8 E4M3** scale, plus one FP32 scale for the whole tensor.
+
+Scales are not free. They take memory too. Let us calculate the real cost per value:
+
+<Derivation title="Real bits per value with block scales" result="MXFP4 costs about 4.25 bits per value and NVFP4 about 4.5 bits per value, not exactly 4.">
+
+1. **MXFP4:** each value has 4 bits, and each block of 32 values shares one 8-bit scale.
+
+   $$
+   4 + \frac{8}{32} = 4.25 \text{ bits per value}
+   $$
+
+2. **NVFP4:** each value has 4 bits, and each block of 16 values shares one 8-bit scale.
+
+   $$
+   4 + \frac{8}{16} = 4.5 \text{ bits per value}
+   $$
+
+3. Compare with plain 4 bits: NVFP4 is $4.5 / 4 = 1.125$, so about **12% bigger**, and MXFP4 about 6% bigger. In exchange, the smaller NVFP4 blocks and more precise scales usually give better accuracy.
+
+</Derivation>
+
+## How much memory does a model need?
+
+Now we can answer the question from the start of the chapter. The memory for the weights is simply:
+
+$$
+\text{memory} = \text{number of parameters} \times \text{bytes per parameter}
+$$
+
+| Model | Parameters | FP32 (4 B) | BF16 (2 B) | FP8 (1 B) | FP4 (0.5 B) |
+| --- | --- | --- | --- | --- | --- |
+| Llama 3.1 8B | 8.03 B | <span class="num">32.1 GB</span> | <span class="num">16.1 GB</span> | <span class="num">8.0 GB</span> | <span class="num">4.0 GB</span> |
+| Llama 3.1 70B | 70.6 B | <span class="num">282 GB</span> | <span class="num">141 GB</span> | <span class="num">70.6 GB</span> | <span class="num">35.3 GB</span> |
+| Llama 3.1 405B | 405 B | <span class="num">1,620 GB</span> | <span class="num">810 GB</span> | <span class="num">405 GB</span> | <span class="num">203 GB</span> |
+
+<Figure n="6.6" title="Which models fit where" caption="Weights of the Llama 3.1 models in three formats, on a log scale. The first vertical line is the memory of one H100 (80 GB). The second is a server with 8 H100s (640 GB). In BF16, the 70B model needs at least two GPUs; in FP8, its weights alone just fit on one. The 405B model in BF16 does not fit even in a full 8-GPU H100 server.">
+  <NfModelSizes />
+</Figure>
+
+<Callout type="warning" title="Fitting the weights is not enough">
+
+Llama 3.1 70B in FP8 needs 70.6 GB, and an H100 has 80 GB. It "fits", but only about 9 GB are left. The model also needs memory for the **KV cache** (the saved data for every token of every user) and for temporary work. With 9 GB left, you could serve only a few users with short texts. We learn how to do this budget properly in chapter 1.8.
+
+</Callout>
+
+In practice, real quantized model files are a little bigger than this table. Some parts usually stay in BF16 (for example the embedding table and the final layer), and scale factors add some bytes too.
+
+## Why smaller numbers are faster
+
+Smaller numbers do not only save memory. They also make inference **faster**, for two reasons.
+
+### Reason 1: fewer bytes to read
+
+In chapter 1.1 we found that, for one user, decode speed is limited by how fast the GPU can **read the weights** from memory. If the weights are half the size, the GPU can read them in half the time.
+
+<Derivation title="Best-case decode speed of Llama 3.1 8B in FP8 on one H100" result="About 420 tokens per second for one user: about 2× faster than BF16 (about 209).">
+
+1. Bytes to read per token, with 1 byte per parameter.
+
+   $$
+   8.03 \times 10^{9} \times 1 \text{ byte} \approx 8.0 \times 10^{9} \text{ bytes}
+   $$
+
+2. Time to read them at the H100 memory speed of about 3.35 TB/s.
+
+   $$
+   \frac{8.0 \times 10^{9}}{3.35 \times 10^{12}} \approx 0.0024 \text{ s} = 2.4 \text{ ms}
+   $$
+
+3. Tokens per second.
+
+   $$
+   \frac{1}{0.0024 \text{ s}} \approx 420 \text{ tokens per second}
+   $$
+
+</Derivation>
+
+### Reason 2: more math per second
+
+The **Tensor Cores** (the special math units of the GPU, see chapter 1.3) can process smaller numbers faster. On an H100, FP8 math is about **2× faster** than BF16 math. On Blackwell GPUs (B200), FP4 is about 2× faster again than FP8. This matters most in **prefill** and in large batches, where the GPU is busy doing math, not waiting for memory.
+
+<KeyNumbers
+  items={[
+    { value: '16 → 8 GB', label: 'Llama 3.1 8B, BF16 → FP8' },
+    { value: '~2×', label: 'faster best-case decode with FP8' },
+    { value: '989 → 1,979', label: 'H100 dense TFLOPS, BF16 → FP8 (about)' },
+    { value: '4.5 bits', label: 'real cost per value in NVFP4' },
+  ]}
+/>
+
+## The price: quality
+
+There is no free lunch. Every time we round a number, we add a small error. Millions of small errors can change the model's answers. Usually:
+
+- **FP8** is close to BF16 quality for most models, when it is done well.
+- **INT4 / FP4** weights save much more memory, but need careful methods to keep quality.
+- Some numbers are harder than others. A few very large values (called **outliers**) in the activations can force a big scale and ruin the precision of all the other values. Many quantization methods are clever ways to handle outliers.
+
+You will often see names like **W8A8** or **W4A16**. They tell you the bits for the **weights (W)** and the **activations (A)**. W4A16 means 4-bit weights, but the math still happens in 16 bits: the weights are expanded back to BF16 just before use. This saves memory and memory reading time, but not math time. W8A8 means both are 8-bit, so the Tensor Cores can also run the faster FP8 or INT8 math.
+
+<Callout type="note">
+
+Methods like GPTQ, AWQ and SmoothQuant, and how to measure quality loss, are covered in the Phase 2 chapter on quantization. Here we only need to know the formats and their costs.
+
+</Callout>
+
+<DeepDive title="Special values, subnormals, and why E4M3 stops at 448">
+
+The simple rule $(-1)^s \times 2^{e - \text{bias}} \times 1.m$ has a few exceptions. They explain the strange "biggest value" numbers in the tables.
+
+**1. Special values.** In FP32, FP16, BF16 and FP8 E5M2, the exponent pattern made of **all 1s** is reserved. With mantissa 0 it means **infinity**; with any other mantissa it means **NaN** (not a number). So the biggest normal exponent is "all 1s minus 1".
+
+- **FP16:** the biggest exponent field is `11110` = 30, so the power is $30 - 15 = 15$. The biggest mantissa is all 1s, which is $2 - 2^{-10}$.
+
+  $$
+  2^{15} \times (2 - 2^{-10}) = 32768 \times 1.9990234 = 65{,}504
+  $$
+
+- **FP8 E5M2:** same exponent rule (bias 15), but only 2 mantissa bits, so the biggest mantissa is 1.75.
+
+  $$
+  2^{15} \times 1.75 = 57{,}344
+  $$
+
+**2. FP8 E4M3 is different.** To win more range, it has **no infinity**. It uses the all-1s exponent for normal numbers, and only the single pattern `S 1111 111` means NaN. Its bias is 7. The biggest exponent field is `1111` = 15, so the power is $15 - 7 = 8$. The biggest mantissa that is not NaN is `110`, which is 1.75.
+
+$$
+2^{8} \times 1.75 = 256 \times 1.75 = 448
+$$
+
+**3. FP4 E2M1** has no special values at all, and a bias of 1. The biggest exponent field is `11` = 3, power $3 - 1 = 2$, and the biggest mantissa is 1.5.
+
+$$
+2^{2} \times 1.5 = 6
+$$
+
+**4. Subnormals.** When the exponent field is all 0s, the rule changes: there is **no hidden "1."** in front. This lets the format store values very close to zero, and zero itself. For FP4, exponent `00` gives the values 0 and 0.5. That is why the FP4 table starts with 0, 0.5 and then jumps to 1, 1.5, 2, 3, 4, 6.
+
+The smallest normal FP16 value is $2^{-14} \approx 0.000061$. With subnormals, FP16 goes down to $2^{-24} \approx 0.00000006$. BF16, with its 8 exponent bits, goes down to about $10^{-38}$. This is one more reason why the large range of BF16 is so useful.
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="How many different values can 4 bits store? And 8 bits?">
+
+4 bits have $2^4 = 16$ patterns. 8 bits have $2^8 = 256$ patterns. Each extra bit doubles the number of patterns.
+
+</Quiz>
+
+<Quiz n={2} q="Decode the FP16 bits 0 10000 1000000000. (Bias is 15.)">
+
+Sign 0: positive. Exponent `10000` = 16, and 16 − 15 = 1, so ×2. Mantissa `1.1` in binary = 1 + ½ = 1.5. The value is $+1 \times 2 \times 1.5 = 3$.
+
+</Quiz>
+
+<Quiz n={3} q="FP16 and BF16 both use 16 bits. What does BF16 give up, and what does it get in return?">
+
+BF16 gives up **precision**: it has 7 mantissa bits instead of 10. In return, it gets the much larger **range** of FP32 (8 exponent bits), so values do not overflow to infinity. Neural networks handle small rounding errors well, but they break with overflows, so BF16 became the default.
+
+</Quiz>
+
+<Quiz n={4} q="A block of FP4 weights is [0.2, −0.8, 1.2]. What scale would you choose, and what are the stored FP4 values?">
+
+The biggest absolute value is 1.2, and the biggest FP4 value is 6, so the scale is $1.2 / 6 = 0.2$. Dividing gives [1, −4, 6]. All three exist in FP4, so they are stored exactly: [1, −4, 6] with scale 0.2.
+
+</Quiz>
+
+<Quiz n={5} q="Why does Llama 3.1 70B in FP8 not really fit on one 80 GB GPU for serving, even though its weights take 70.6 GB?">
+
+Because serving needs more than the weights. The KV cache for each user's tokens and some temporary working memory also need space. With only about 9 GB left, you could serve very few users. In practice you use two GPUs, or a GPU with more memory (like an H200 with 141 GB).
+
+</Quiz>
+
+<Takeaways>
+
+- A computer stores numbers in **bits**. $n$ bits give $2^n$ patterns, and 8 bits make a **byte**.
+- A floating-point number has a **sign**, an **exponent** (range) and a **mantissa** (precision): $(-1)^s \times 2^{e-\text{bias}} \times 1.m$.
+- **BF16** is the default for LLMs because it keeps the huge range of FP32. **FP8** and **FP4** halve and quarter the memory again.
+- Tiny formats need **scale factors**: per-tensor, per-channel or per-block. **MXFP4** uses blocks of 32, **NVFP4** blocks of 16.
+- Memory = parameters × bytes per parameter. Smaller formats mean **fewer bytes to read** (faster decode) and **faster Tensor Core math**, at some risk to quality.
+
+</Takeaways>
