@@ -1,0 +1,348 @@
+---
+title: 'Prefill and Decode'
+description: 'Why reading the prompt and writing the answer are two very different jobs for the GPU: shapes, arithmetic intensity, real timings on an H100, and why mixing them causes trouble.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import PvdShapes from '../../../components/figures/inference-fundamentals/PvdShapes.astro';
+import PvdRoofline from '../../../components/figures/inference-fundamentals/PvdRoofline.astro';
+import PvdTimeline from '../../../components/figures/inference-fundamentals/PvdTimeline.astro';
+import PvdInterference from '../../../components/figures/inference-fundamentals/PvdInterference.astro';
+import PvdQuadratic from '../../../components/figures/inference-fundamentals/PvdQuadratic.astro';
+
+Every LLM request has two parts. First the model reads your whole prompt: this is **prefill**. Then it writes the answer, one token at a time: this is **decode**. They use the same weights and the same code. But for the GPU they are **two completely different jobs**: one is limited by math, the other by memory. This difference explains TTFT and TPOT, why batching works, why long prompts hurt other users, and why Phase 3 has whole chapters on chunked prefill and disaggregated serving.
+
+<NewWords
+  words={[
+    { word: 'Prefill', meaning: 'The first step of a request: the model processes all prompt tokens together and makes the first output token.' },
+    { word: 'Decode', meaning: 'All later steps: the model processes one new token per sequence per step.' },
+    { word: 'TTFT', meaning: 'Time to first token: how long until the first word of the answer appears.' },
+    { word: 'TPOT', meaning: 'Time per output token: the average gap between tokens after the first one.' },
+    { word: 'Arithmetic intensity', meaning: 'FLOPs done per byte moved from memory. High means compute-bound, low means memory-bound.' },
+    { word: 'MFU', meaning: 'Model FLOPs utilisation: what share of the GPU’s peak math speed you really use.' },
+    { word: 'Interference', meaning: 'When one request’s work slows down other requests that share the same GPU.' },
+  ]}
+/>
+
+## The simple picture: reading vs writing
+
+Imagine you must answer a long letter.
+
+- **Reading the letter** is fast. Your eyes move over many words at once, and you understand them together. This is **prefill**: all prompt tokens are known, so the GPU processes them **in parallel**.
+- **Writing the answer** is slow. You write one word, then think, then the next word. Each word depends on the words before it. This is **decode**: one token per step, and each step must wait for the previous one.
+
+The surprise is *why* writing is slow on a GPU. It is not because the math is hard. It is because, for every single word, the GPU must **read all 16 GB of weights again**, and it does very little math with them.
+
+## Two different shapes
+
+In the [forward pass chapter](/inference-fundamentals/transformer-forward-pass) we saw that every token is a row of 4096 numbers, and most of the work is multiplying rows by weight matrices. The difference between prefill and decode is simply **how many rows** go in at once.
+
+- **Prefill of a 2,000-token prompt:** the input is a matrix of **2,000 × 4096**. Each weight matrix is read from memory once and used for **2,000 rows**.
+- **Decode of one sequence:** the input is **1 × 4096**: a single row. Each weight matrix is read from memory once and used for **1 row**.
+
+<Figure n="6.1" title="Same weights, very different reuse" caption="In prefill, a tall matrix of 2,000 token rows is multiplied by each weight matrix, so every weight that is loaded from memory is used 2,000 times. In decode, a single row is multiplied by the same matrix, so every weight is used once.">
+  <PvdShapes />
+</Figure>
+
+This is the whole story in one picture. Loading a weight from HBM is expensive. Using it once you have loaded it is cheap. Prefill loads each weight once and uses it 2,000 times. Decode loads each weight once and uses it **once**.
+
+## Arithmetic intensity of each phase
+
+In the [roofline chapter](/gpu-hardware/roofline) we learned to measure this with **arithmetic intensity**: FLOPs per byte moved. The H100's **ridge point** is about **295 FLOPs per byte**. Below it, work is memory-bound; above it, compute-bound.
+
+<Derivation title="Intensity of one weight matrix in prefill and decode" result="Prefill of 2,000 tokens: about 1,000 FLOPs per byte (compute-bound). Decode of 1 token: about 1 FLOP per byte (memory-bound).">
+
+1. Take one $4096 \times 4096$ weight matrix in BF16 (2 bytes per number). Multiply an input of $M$ rows by it. FLOPs:
+
+   $$
+   2 \times M \times 4096 \times 4096
+   $$
+
+2. Bytes moved: read the input ($M \times 4096$), read the weights ($4096 \times 4096$), write the output ($M \times 4096$), each at 2 bytes:
+
+   $$
+   2 \times (4096M + 4096^2 + 4096M)
+   $$
+
+3. Divide FLOPs by bytes and simplify (cancel $2 \times 4096$):
+
+   $$
+   I = \frac{4096\,M}{2M + 4096}
+   $$
+
+4. **Decode**, $M = 1$:
+
+   $$
+   I = \frac{4096}{4098} \approx 1 \text{ FLOP per byte}
+   $$
+
+5. **Prefill**, $M = 2000$:
+
+   $$
+   I = \frac{4096 \times 2000}{4000 + 4096} \approx 1{,}012 \text{ FLOPs per byte}
+   $$
+
+</Derivation>
+
+A short rule to remember: **for prefill, intensity grows with the number of prompt tokens; for decode, intensity grows with the batch size.** If we count only the weight bytes (they dominate for short prompts), prefill intensity is about $N$ (prompt length) and decode intensity is about $B$ (number of sequences in the batch).
+
+<Figure n="6.2" title="Prefill and decode on the H100 roofline" caption="Decode at batch 1 sits at the bottom left: it uses about 0.3% of the GPU’s math power. Batching 64 sequences moves it up the slope. Prefill of a 2,000-token prompt sits on the flat compute roof.">
+  <PvdRoofline />
+</Figure>
+
+How long must a prompt be before prefill becomes compute-bound? Roughly when its intensity passes the ridge point. With the weights-only rule, that is about **300 tokens** on an H100. Most real prompts (system prompt + chat history + question) are longer than this. So in practice: **prefill is compute-bound, decode is memory-bound.**
+
+## Timing prefill on an H100
+
+Let us estimate TTFT for a 2,000-token prompt on Llama 3.1 8B.
+
+<Derivation title="Ideal and realistic prefill time for 2,000 tokens" result="About 32 ms in a perfect world; about 65 ms is a realistic estimate at half of peak speed.">
+
+1. FLOPs for the linear layers, using the "2 × parameters per token" rule:
+
+   $$
+   2 \times 8.03 \times 10^{9} \times 2000 \approx 32.1 \times 10^{12} \text{ FLOPs}
+   $$
+
+2. Attention adds a little at this length (about $1 \times 10^{12}$ FLOPs, see the deep dive). Ignore it for now.
+
+3. Time at the H100's peak of $989 \times 10^{12}$ FLOPs per second:
+
+   $$
+   \frac{32.1 \times 10^{12}}{989 \times 10^{12}} \approx 32.5 \text{ ms}
+   $$
+
+4. Check memory: reading 16 GB of weights at 3,350 GB/s takes $16 / 3350 \approx 4.8$ ms. That is much less than 32.5 ms, so prefill is indeed **compute-bound**.
+
+5. Real kernels do not reach 100% of peak. A common realistic range for big prefills is roughly 40 to 60% of peak (this share is called **MFU**). At 50%:
+
+   $$
+   \frac{32.5 \text{ ms}}{0.5} \approx 65 \text{ ms}
+   $$
+
+</Derivation>
+
+So TTFT grows **in proportion to the prompt length**. A 20,000-token prompt (a long document) needs about 10× more prefill work: roughly 0.65 s on one H100, plus extra for attention, which grows faster at that length.
+
+<Callout type="note">
+
+TTFT as the user sees it also includes **waiting in the queue** (if the server is busy), tokenization, and network time. On a loaded server, the queue can be the biggest part. We study this in Phase 3 (scheduling) and Phase 5 (SLOs).
+
+</Callout>
+
+## Timing decode on an H100
+
+Now one decode step, at batch 1, with the 2,000-token prompt already in the KV cache.
+
+<Derivation title="One decode step for one user" result="About 5 ms per token in an ideal world, so at most about 200 tokens per second for one user.">
+
+1. Read all weights (16.06 GB) at 3.35 TB/s:
+
+   $$
+   \frac{16.06 \times 10^{9}}{3.35 \times 10^{12}} \approx 4.8 \text{ ms}
+   $$
+
+2. Read the KV cache of the 2,000 earlier tokens. At 128 KiB (131,072 bytes) per token:
+
+   $$
+   2000 \times 131{,}072 \approx 0.26 \text{ GB} \;\to\; \frac{0.26 \times 10^{9}}{3.35 \times 10^{12}} \approx 0.08 \text{ ms}
+   $$
+
+3. Math: about $16 \times 10^{9}$ FLOPs at $989 \times 10^{12}$ per second, about 0.016 ms. Tiny.
+
+4. The step time is set by memory:
+
+   $$
+   T_{step} \approx 4.8 + 0.08 \approx 4.9 \text{ ms}
+   $$
+
+</Derivation>
+
+Notice what decides TPOT: **the size of the model in bytes** (and later the KV cache), divided by **memory bandwidth**. The prompt length hardly matters for one user at 2,000 tokens. It matters more for long contexts and big batches, because the KV cache reads grow.
+
+<Figure n="6.3" title="A full request on the timeline" caption="With a 2,000-token prompt and a 300-token answer, prefill takes about 65 ms, then 300 decode steps of about 5 ms each follow. Total: about 1.6 s. Most of the time is spent in decode, even though prefill processes more tokens.">
+  <PvdTimeline />
+</Figure>
+
+<Derivation title="End-to-end latency of the request" result="About 1.6 s: 65 ms of prefill and about 1.5 s of decode.">
+
+1. The total time is TTFT plus one TPOT for every token after the first:
+
+   $$
+   T_{total} = \text{TTFT} + (L_{out} - 1) \times \text{TPOT}
+   $$
+
+2. With TTFT ≈ 65 ms, $L_{out} = 300$ and TPOT ≈ 5 ms:
+
+   $$
+   65 + 299 \times 5 \approx 65 + 1495 = 1560 \text{ ms} \approx 1.6 \text{ s}
+   $$
+
+</Derivation>
+
+This surprises many people. The prompt has **2,000** tokens and the answer only **300**, yet decode takes **23 times longer** than prefill. Per token, prefill costs about 0.03 ms and decode about 5 ms: a difference of more than 100×.
+
+<KeyNumbers
+  items={[
+    { value: '≈ 1,000', label: 'FLOPs/byte in a 2,000-token prefill' },
+    { value: '≈ 1', label: 'FLOP/byte in decode at batch 1' },
+    { value: '≈ 65 ms', label: 'realistic prefill of 2,000 tokens' },
+    { value: '≈ 5 ms', label: 'per decode step, batch 1' },
+  ]}
+/>
+
+## Batching fixes decode (mostly)
+
+If decode wastes 99.7% of the GPU's math power, the fix is obvious: **process many sequences in the same step**. The weights are read once and used for all of them. With a batch of $B$ sequences, the intensity becomes about $B$.
+
+<Derivation title="Decode with 64 users, each with a 2,000-token context" result="About 10 ms per step and about 6,500 tokens per second in total, but each user gets about 100 tokens per second instead of 200.">
+
+1. Weights are read once for the whole batch: about 4.8 ms.
+
+2. But each sequence has its **own** KV cache, so those reads add up:
+
+   $$
+   64 \times 2000 \times 131{,}072 \approx 16.8 \text{ GB} \;\to\; \approx 5.0 \text{ ms}
+   $$
+
+3. Math: $2 \times 8.03 \times 10^{9} \times 64 \approx 1.03 \times 10^{12}$ FLOPs, about 1.0 ms. Still smaller than memory time.
+
+4. Step time ≈ $4.8 + 5.0 \approx 9.8$ ms. Throughput and per-user speed:
+
+   $$
+   \frac{64}{9.8 \text{ ms}} \approx 6{,}500 \text{ tokens/s}, \qquad \frac{1}{9.8 \text{ ms}} \approx 102 \text{ tokens/s per user}
+   $$
+
+</Derivation>
+
+Two lessons:
+
+- **Batching is a huge win for throughput.** 64 users get served in about twice the time of one user, so total output is about 32× higher.
+- **The KV cache limits batching.** Weights are shared across the batch, but KV cache reads are not. At big batches and long contexts, the KV cache becomes the main memory traffic. Its intensity stays low (about 4 FLOPs per byte for Llama 3.1 8B, thanks to GQA) no matter how big the batch is. This is why so much work goes into shrinking it: GQA, MLA, quantized KV cache. See the chapter on [the KV cache](/inference-fundamentals/kv-cache).
+
+<Callout type="idea">
+
+**Prefill wants compute. Decode wants memory bandwidth and memory capacity.** Almost every serving trick can be understood as helping one of the two phases, or stopping them from hurting each other.
+
+</Callout>
+
+## The interference problem
+
+A serving engine runs many requests at once on the same GPU. Some are in decode (writing answers). New ones arrive and need prefill. What happens when a big prefill joins a step full of decode work?
+
+<Derivation title="One 2,000-token prompt arrives during decode" result="For one step, all 64 decode users wait about 75 ms instead of 10 ms. They see a visible pause in their stream.">
+
+1. Decode-only steps for 64 users take about 10 ms each (previous derivation).
+
+2. A new 2,000-token prompt joins the next step. Its prefill alone is about 65 ms (realistic estimate).
+
+3. The GPU runs the whole step before anyone gets a token. So that step takes:
+
+   $$
+   T_{step} \approx 65 + 10 = 75 \text{ ms}
+   $$
+
+4. For those 64 users, one token arrives after 75 ms instead of 10 ms: a sudden 7.5× slowdown. With a stream of new prompts, this happens again and again.
+
+</Derivation>
+
+<Figure n="6.4" title="Prefill stalls decode" caption="Row A: steady decode steps. Row B: one long prefill in the middle stops every decode user for a whole step. Row C: chunked prefill, a Phase 3 technique, splits the prompt into pieces so each step is only a little longer.">
+  <PvdInterference />
+</Figure>
+
+This is called **prefill–decode interference**. There are two main families of solutions, both covered in Phase 3:
+
+1. **Chunked prefill.** Split a long prompt into chunks (for example 512 tokens) and mix one chunk into each step together with the decode work. Each step becomes a little longer, but there is no big stall. It also fills the GPU's spare math power during decode steps, which is a nice bonus. See [chunked prefill](/serving-engines/chunked-prefill).
+2. **Disaggregated serving.** Run prefill and decode on **different GPUs**. Prefill GPUs do only prompts; decode GPUs only generate. The KV cache is sent from one to the other over a fast network. Each pool can be sized and tuned for its own job. See [disaggregated prefill and decode](/serving-engines/disaggregated-serving).
+
+<Callout type="real" title="What the knobs control">
+
+Most engines expose a setting for the maximum number of tokens processed in one step (in vLLM it is `max_num_batched_tokens`). A smaller value means smaller prefill chunks: steadier TPOT for users who are decoding, but slower TTFT for new prompts. A bigger value does the opposite. Tuning this trade-off is a daily job in production.
+
+</Callout>
+
+## What controls TTFT and TPOT: a summary
+
+| | Prefill | Decode |
+| --- | --- | --- |
+| Tokens per sequence per step | All prompt tokens | 1 |
+| Typical intensity | About the prompt length (hundreds to thousands) | About the batch size (1 to a few hundred) |
+| Bottleneck | Compute (FLOPs) | Memory bandwidth (weights + KV cache) |
+| User sees it as | TTFT | TPOT |
+| Gets slower with | Longer prompts | Bigger models, longer contexts, bigger batches |
+| Helped by | More FLOPS, FP8, prefix caching | More bandwidth, smaller weights (quantization), smaller KV cache, batching |
+
+<DeepDive title="Attention makes long prefills quadratic">
+
+So far we counted only the linear layers, which cost the same for every token. Attention is different: token number $i$ looks at $i$ earlier tokens, so its cost grows with its position. From the [forward pass chapter](/inference-fundamentals/transformer-forward-pass), one token at position $i$ costs about $4 d i$ attention FLOPs per layer (with $d = 4096$).
+
+For a whole prompt of $N$ tokens, add this up over all positions:
+
+$$
+\sum_{i=1}^{N} 4 d i = 4d \cdot \frac{N(N+1)}{2} \approx 2 d N^2 \text{ per layer}
+$$
+
+For all $L = 32$ layers: $2 d L N^2$. Compare it with the linear layers, $2 P_L N$, where $P_L \approx 6.98 \times 10^9$ is the number of weights in the 32 layers:
+
+$$
+\frac{\text{attention}}{\text{linear}} = \frac{2 d L N^2}{2 P_L N} = \frac{d L}{P_L}\, N = \frac{4096 \times 32}{6.98 \times 10^{9}}\, N \approx \frac{N}{53{,}000}
+$$
+
+So the attention share is about 4% at 2K tokens, but attention is **2.5 times** the linear work at 128K tokens.
+
+<Figure n="6.5" title="Attention’s share of prefill work" caption="Linear layers grow like N; attention grows like N². At 128K tokens, attention is about 71% of all prefill FLOPs, and even an ideal H100 needs over 6 seconds for the prompt.">
+  <PvdQuadratic />
+</Figure>
+
+There is a memory problem too. A naive implementation would build the full $N \times N$ score matrix for each head. At $N = 131{,}072$ in BF16, that is $131{,}072^2 \times 2 \approx 34$ GB **for one head of one layer**. It cannot fit. **FlashAttention** solves this by processing the scores in small tiles that stay in on-chip SRAM and never writing the full matrix to HBM. See the chapter on [FlashAttention](/inference-fundamentals/flash-attention).
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="Why is prefill compute-bound but decode memory-bound, when they use the same weights?">
+
+Because of reuse. In prefill, each weight loaded from memory is used for every prompt token (hundreds or thousands of times), so the intensity is high. In decode, each weight is used for only one token per sequence, so the intensity is about 1 per sequence in the batch.
+
+</Quiz>
+
+<Quiz n={2} q="Estimate the ideal prefill time for a 10,000-token prompt on Llama 3.1 8B on one H100 (ignore attention).">
+
+2 × 8.03 × 10⁹ × 10,000 ≈ 1.6 × 10¹⁴ FLOPs. Divided by 989 × 10¹² FLOPs/s ≈ 0.16 s ideal. At about 50% MFU, about 0.33 s.
+
+</Quiz>
+
+<Quiz n={3} q="You switch from an H100 to an H200 (same FLOPS, 4.8 TB/s instead of 3.35 TB/s). Which gets faster: TTFT or TPOT?">
+
+Mainly TPOT, because decode is limited by memory bandwidth. Weights take 16 / 4800 ≈ 3.3 ms instead of 4.8 ms, about 1.4× faster. TTFT barely changes, because prefill is limited by FLOPS, which are the same.
+
+</Quiz>
+
+<Quiz n={4} q="Why does batching help decode a lot, but stop helping as much at long contexts?">
+
+Batching shares the weight reads across all sequences, raising intensity. But each sequence has its own KV cache, and those reads grow with batch size × context length. At long contexts, KV cache reads dominate, and their intensity stays low no matter the batch size.
+
+</Quiz>
+
+<Quiz n={5} q="A user complains that their streamed answer “freezes” for a moment from time to time. What is a likely cause, and one fix?">
+
+Prefill–decode interference: a long prompt from another user is being prefilled in the same step, so every decode step waits for it. Fixes: chunked prefill (limit tokens per step) or disaggregated prefill and decode on separate GPUs.
+
+</Quiz>
+
+<Takeaways>
+
+- **Prefill** processes all prompt tokens at once; **decode** processes one token per sequence per step.
+- Prefill reuses each weight for every prompt token: intensity ≈ **prompt length**, so it is **compute-bound**. Decode uses each weight once per sequence: intensity ≈ **batch size**, so it is **memory-bound**.
+- On an H100, Llama 3.1 8B prefills 2,000 tokens in about **32 ms ideal / 65 ms realistic**, while one decode step takes about **5 ms**. TTFT grows with prompt length; TPOT grows with model bytes, context and batch.
+- **Batching** makes decode efficient, but every sequence brings its **own KV cache**, which becomes the limit at long contexts.
+- Mixing big prefills with decode causes **interference** (stalls). Phase 3 fixes it with **chunked prefill** and **disaggregated serving**. Attention makes very long prefills **quadratic**.
+
+</Takeaways>
