@@ -1,0 +1,442 @@
+---
+title: 'The KV Cache'
+description: 'The memory trick that stops the model from repeating work: why keys and values can be saved, how big they get, and why they make every decode step slower.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import KvRecompute from '../../../components/figures/inference-fundamentals/KvRecompute.astro';
+import KvShelf from '../../../components/figures/inference-fundamentals/KvShelf.astro';
+import KvStepBytes from '../../../components/figures/inference-fundamentals/KvStepBytes.astro';
+import KvToolbox from '../../../components/figures/inference-fundamentals/KvToolbox.astro';
+import KvCacheGrowth from '../../../components/widgets/KvCacheGrowth.astro';
+
+In [chapter 1.8](/gpu-hardware/choosing-hardware) we measured the KV cache: we counted its bytes, and we saw that it often needs more GPU memory than the model itself. But we did not ask **why** it exists, or **what it does to speed**. This chapter answers both questions. By the end, you will understand the most important data structure in LLM serving. Almost every serving engine (vLLM, SGLang, TensorRT-LLM) is built around managing it.
+
+<NewWords
+  words={[
+    { word: 'Attention', meaning: 'The part of each layer where the current token looks back at earlier tokens and takes information from them.' },
+    { word: 'Query (Q)', meaning: 'A vector that the current token makes. It describes what the token is looking for.' },
+    { word: 'Key (K)', meaning: 'A vector that every token makes. It works like a label: other tokens compare their query with it.' },
+    { word: 'Value (V)', meaning: 'A vector that every token makes. It is the information the token gives to others that pay attention to it.' },
+    { word: 'KV cache', meaning: 'The saved keys and values of all earlier tokens, kept in GPU memory so they are not computed again.' },
+    { word: 'Context length', meaning: 'How many tokens a sequence has so far: prompt plus generated tokens.' },
+    { word: 'Causal', meaning: 'A token can only look at itself and the tokens before it, never at future tokens.' },
+    { word: 'Head', meaning: 'Attention is split into several independent parts called heads. Each head has its own Q, K and V.' },
+  ]}
+/>
+
+## The problem: a model with no memory
+
+In [chapter 1.1](/gpu-hardware/what-is-inference) we saw the token-by-token loop. The model reads the text, picks one new token, adds it to the text, and runs again. Now look at that loop closely. In every step, the text is **almost the same** as in the step before. Only one token is new.
+
+A naive program does not care. In every step it runs the whole model on **all** tokens again, from the first one to the newest one. If the text has 1,000 tokens, it processes 1,000 tokens to get token 1,001. Then it processes 1,001 tokens to get token 1,002. Almost all of this work was already done in the step before.
+
+To see what we can save, we need to know what the model computes for each token. The key part is **attention**.
+
+### Attention in one paragraph
+
+In every layer, each token makes three vectors (lists of numbers): a **query**, a **key** and a **value**. The newest token compares its **query** with the **keys** of all tokens so far. Each comparison gives a score: "how useful is that token for me?". The scores become weights that add up to 1. Then the newest token takes a **weighted mix of the values** of all tokens. That mix is the output of attention. (Chapter [2.4](/inference-fundamentals/transformer-forward-pass) explains every step of this with shapes and numbers.)
+
+<Callout type="analogy" title="Questions, labels and boxes">
+
+Think of every earlier token as a **box on a shelf**. Each box has a **label** on the front (the key) and **things inside** (the value). The newest token arrives with a **question** (the query). It reads every label, decides how well each label matches its question, and then takes some things from every box: a lot from boxes with a good match, and very little from the others.
+
+The important point: the labels and the contents of old boxes **do not change** when a new token arrives. Only the question is new.
+
+</Callout>
+
+So, to process the newest token, the model needs:
+
+- the **query** of the newest token (new, must be computed),
+- the **keys and values of all earlier tokens** (old, already computed in earlier steps).
+
+Without a cache, the model throws the old keys and values away after each step, and computes them again in the next step.
+
+<Figure n="7.1" title="Recomputing everything vs reusing the cache" caption="A prompt of 3 tokens, then 5 steps. Without a cache (left), every step computes keys and values for all tokens again: 25 token computations. With a cache (right), the first step computes the 3 prompt tokens, and every later step only computes the 1 new token and reads the rest from memory: 7 token computations.">
+  <KvRecompute />
+</Figure>
+
+## Why we are allowed to save K and V
+
+Saving the old keys and values only works if they never change. Do they?
+
+Yes, because LLMs use **causal** attention. A token can only look at itself and at **earlier** tokens. It can never look at later tokens. So when token 1,002 arrives, nothing about token 37 changes: token 37 could not see token 1,002, so its vectors in every layer stay exactly the same.
+
+<Callout type="idea">
+
+Because attention is **causal**, the key and value of a token depend only on that token and the tokens **before** it. Once they are computed, they stay correct forever. That is the whole reason a KV cache is possible. We save them once and read them in every later step.
+
+</Callout>
+
+Why do we save **K and V**, but not **Q**? Because the query is only used by its own token, at the moment that token is processed. Later tokens never need the query of an old token. They only need its key (to compare with) and its value (to take from). So the query is used once and thrown away.
+
+## How much work does the cache save?
+
+Let us count the work in "token passes". One token pass means sending one token through all layers. From [chapter 1.1](/gpu-hardware/what-is-inference), one token pass of Llama 3.1 8B costs about $2 \times 8 \times 10^9 = 16$ GFLOPs.
+
+<Derivation title="Total work to generate n tokens after a prompt of p tokens" result="Without a cache the work grows with n², with a cache it grows with n. For p = 1,000 and n = 500 the cache saves more than 99% of the work.">
+
+1. **Without a cache.** Step 1 processes the $p$ prompt tokens. Step 2 processes $p + 1$ tokens. Step $k$ processes $p + k - 1$ tokens. Add all $n$ steps:
+
+   $$
+   \text{passes}_{\text{no cache}} = \sum_{k=1}^{n} (p + k - 1) = n \cdot p + \frac{n(n-1)}{2}
+   $$
+
+2. **With a cache.** Step 1 (prefill) processes the $p$ prompt tokens. Each of the other $n - 1$ steps processes only **one** new token:
+
+   $$
+   \text{passes}_{\text{cache}} = p + (n - 1)
+   $$
+
+3. Put in real numbers: a prompt of $p = 1{,}000$ tokens and an answer of $n = 500$ tokens.
+
+   $$
+   \text{no cache: } 500 \times 1{,}000 + \frac{500 \times 499}{2} = 500{,}000 + 124{,}750 = 624{,}750 \text{ passes}
+   $$
+
+   $$
+   \text{cache: } 1{,}000 + 499 = 1{,}499 \text{ passes}
+   $$
+
+4. Compare: $624{,}750 \div 1{,}499 \approx 417$. The cache does about **417 times less** work. For a longer answer, the gap grows even more, because of the $n^2$ term.
+
+</Derivation>
+
+417 times less work sounds amazing. But look at the **time** on a real H100, and something surprising appears.
+
+<Callout type="example" title="Work vs time on one H100">
+
+**Without a cache:** $624{,}750$ passes $\times 16$ GFLOPs $= 1.0 \times 10^{16}$ FLOPs. Each step processes many tokens at once, so it is compute-bound. At about 989 TFLOPS, this needs at least $1.0 \times 10^{16} \div 989 \times 10^{12} \approx 10$ seconds.
+
+**With a cache:** the prefill of 1,000 tokens is quick (about $16 \times 10^{12} \div 989 \times 10^{12} \approx 16$ ms). Then 499 decode steps follow. Each one must read all 16 GB of weights, which takes about 4.8 ms (from [chapter 1.1](/gpu-hardware/what-is-inference)). So: $499 \times 4.8 \text{ ms} \approx 2.4$ seconds.
+
+The cache does 417× less work, but the answer arrives only about 4× faster.
+
+</Callout>
+
+Why only 4×? Because the cache changes **what limits us**. Without a cache, the GPU is busy with math. With a cache, each step has very little math, and the GPU mostly waits for memory, as we learned in the [roofline chapter](/gpu-hardware/roofline). The KV cache **trades compute for memory**. That trade is clearly worth it, but it means that from now on, **memory is our main problem**: memory space, and memory bandwidth.
+
+## What exactly is stored?
+
+For every token, in every layer, the cache holds one key vector and one value vector. Modern models split attention into **heads**, and the key and value are split the same way. Llama 3.1 8B has **8 KV heads** per layer, and each head has **128 numbers**.
+
+<Figure n="7.2" title="The KV cache of one sequence" caption="For every layer, the cache keeps a row of keys (K) and a row of values (V), with one cell per token. When the 7th token arrives, one new K cell and one new V cell are added to every one of the 32 layers. The old cells are never changed.">
+  <KvShelf />
+</Figure>
+
+This gives the formula we already used in chapter 1.8:
+
+$$
+\text{KV bytes per token} = 2 \times L \times H_{kv} \times d_{head} \times b
+$$
+
+The 2 is for K and V, $L$ is the number of layers, $H_{kv}$ the number of KV heads, $d_{head}$ the size of one head, and $b$ the bytes per number.
+
+<Derivation title="KV per token for three real models (BF16, b = 2)" result="Llama 3.1 8B: 128 KiB · Llama 3.1 70B: 320 KiB · Llama 2 7B: 512 KiB per token.">
+
+1. **Llama 3.1 8B:** 32 layers, 8 KV heads, 128 numbers per head.
+
+   $$
+   2 \times 32 \times 8 \times 128 \times 2 = 131{,}072 \text{ bytes} = 128 \text{ KiB}
+   $$
+
+2. **Llama 3.1 70B:** 80 layers, 8 KV heads, 128 numbers per head.
+
+   $$
+   2 \times 80 \times 8 \times 128 \times 2 = 327{,}680 \text{ bytes} = 320 \text{ KiB}
+   $$
+
+3. **Llama 2 7B:** 32 layers, but **32 KV heads** (one for every query head), 128 numbers per head.
+
+   $$
+   2 \times 32 \times 32 \times 128 \times 2 = 524{,}288 \text{ bytes} = 512 \text{ KiB}
+   $$
+
+</Derivation>
+
+Look at the last line. Llama 2 7B is a **smaller** model than Llama 3.1 8B, but its KV cache per token is **4 times bigger**. The reason is the number of KV heads: 32 instead of 8. Newer models share each KV head between several query heads, which makes the cache much smaller. The next chapter, [Sharing Heads](/inference-fundamentals/attention-variants), is all about this idea.
+
+| Model | Layers | KV heads | KV per token | One 8K sequence | One 128K sequence |
+| --- | --- | --- | --- | --- | --- |
+| Llama 2 7B | 32 | 32 | <span class="num">512 KiB</span> | <span class="num">4.29 GB</span> | (max context 4K) |
+| Llama 3.1 8B | 32 | 8 | <span class="num">128 KiB</span> | <span class="num">1.07 GB</span> | <span class="num">17.2 GB</span> |
+| Llama 3.1 70B | 80 | 8 | <span class="num">320 KiB</span> | <span class="num">2.68 GB</span> | <span class="num">42.9 GB</span> |
+| Llama 3.1 405B | 126 | 8 | <span class="num">504 KiB</span> | <span class="num">4.23 GB</span> | <span class="num">67.6 GB</span> |
+
+Read the last column slowly. **One single user** with a full 128K-token conversation on Llama 3.1 8B needs 17.2 GB of KV cache, which is more than the whole model (16 GB).
+
+## How the cache is filled and emptied
+
+The cache of a request has a simple life:
+
+1. **Prefill.** The prompt arrives. The model processes all prompt tokens together and writes their keys and values into the cache, for every layer. A 2,000-token prompt on Llama 3.1 8B writes $2{,}000 \times 128 \text{ KiB} \approx 262$ MB at once.
+2. **Decode.** Each step computes K and V for the one new token, appends them (128 KiB more), and reads the whole cache of this request to do attention.
+3. **Finish.** When the request ends (an end token or a length limit), its cache is no longer needed. The engine frees the memory for other requests.
+
+So the cache of a request **grows during its whole life** and then disappears at once. When thousands of requests start and end at different times, managing this memory becomes a hard puzzle. Engines solve it with **PagedAttention** ([chapter 3.3](/serving-engines/paged-attention)).
+
+## Growth with context and batch
+
+Now add more users. Each user has their **own** cache, because each conversation has different tokens.
+
+$$
+\text{KV memory} = B \times T \times \text{KV bytes per token}
+$$
+
+Here $B$ is the number of sequences in the batch, and $T$ is the number of tokens in each sequence.
+
+<Derivation title="When does the KV cache become bigger than the model?" result="After about 122,500 cached tokens in total, the KV cache of Llama 3.1 8B is bigger than its 16 GB of weights.">
+
+1. Weights of Llama 3.1 8B in BF16:
+
+   $$
+   8.03 \times 10^{9} \times 2 = 16.06 \times 10^{9} \text{ bytes}
+   $$
+
+2. Divide by the KV size of one token:
+
+   $$
+   \frac{16.06 \times 10^{9}}{131{,}072} \approx 122{,}500 \text{ tokens}
+   $$
+
+3. That is only **15 users with 8K tokens** each ($15 \times 8{,}192 = 122{,}880$), or **one** user with a 128K conversation.
+
+</Derivation>
+
+And for the example from chapter 1.8, **32 users with 8K tokens** each: $32 \times 8{,}192 \times 131{,}072 \approx 34.4$ GB. That is more than **twice** the model.
+
+<KeyNumbers
+  items={[
+    { value: '128 KiB', label: 'KV per token, Llama 3.1 8B' },
+    { value: '1.07 GB', label: 'one 8K-token sequence' },
+    { value: '~122,500', label: 'tokens until KV = weights' },
+    { value: '34.4 GB', label: '32 users × 8K tokens' },
+  ]}
+/>
+
+## The cache makes every decode step slower
+
+The KV cache does not only take **space**. It also takes **time**, because it must be **read** in every decode step.
+
+In each decode step, every sequence does attention: its new query must be compared with **all** of its cached keys, and it must mix **all** of its cached values. So in one step, the GPU must read:
+
+- all the **weights** once (shared by every sequence in the batch), and
+- the **whole KV cache of every sequence** (not shared, each sequence has its own).
+
+<Derivation title="One decode step, 32 users with 8K tokens each, on one H100" result="About 15 ms per step and 2,100 tokens per second for the batch, instead of the 6,700 we would get if only the weights counted.">
+
+1. Bytes for the weights (read once):
+
+   $$
+   16.06 \text{ GB}
+   $$
+
+2. Bytes for the KV cache of all 32 sequences:
+
+   $$
+   32 \times 8{,}192 \times 131{,}072 \text{ bytes} \approx 34.36 \text{ GB}
+   $$
+
+3. Total bytes read in one step, and the time at 3.35 TB/s:
+
+   $$
+   \frac{16.06 + 34.36 \text{ GB}}{3.35 \text{ TB/s}} = \frac{50.42}{3{,}350} \text{ s} \approx 15.0 \text{ ms}
+   $$
+
+4. One token per sequence per step:
+
+   $$
+   \frac{32 \text{ tokens}}{0.0150 \text{ s}} \approx 2{,}126 \text{ tokens per second}
+   $$
+
+5. If we ignored the KV cache (weights only, 4.8 ms per step), we would expect $32 \div 0.0048 \approx 6{,}700$ tokens per second. The cache makes this batch about **3× slower**.
+
+</Derivation>
+
+<Figure n="7.3" title="What one decode step has to read" caption="The weights (blue) are the same for every batch size, because all users share them. The KV cache (orange) grows with the batch, because every user has their own. At batch 32 with 8K tokens each, the KV cache is already the bigger part of every step.">
+  <KvStepBytes />
+</Figure>
+
+### Why batching does not help attention
+
+In the [roofline chapter](/gpu-hardware/roofline) we learned the main trick of decode: **batching**. The weights are read once and used by all $B$ sequences, so the arithmetic intensity grows to about $B$ FLOPs per byte. Bigger batch, better use of the GPU.
+
+The KV cache does not get this bonus. Each sequence reads **its own** keys and values, and nobody else uses them. Let us measure the intensity of attention during decode.
+
+<Derivation title="Arithmetic intensity of decode attention (Llama 3.1 8B)" result="About 4 FLOPs per byte, no matter how big the batch is. The H100 needs about 295 to be busy.">
+
+1. Look at one KV head and one cached token. We read its key and its value: $2 \times 128$ numbers at 2 bytes each.
+
+   $$
+   \text{bytes} = 2 \times 128 \times 2 = 512
+   $$
+
+2. Llama 3.1 8B has 32 query heads and 8 KV heads, so **4 query heads share each KV head**. Each of the 4 queries does a dot product with the key ($2 \times 128$ FLOPs: 128 multiplies and 128 adds) and adds the value into its output ($2 \times 128$ FLOPs).
+
+   $$
+   \text{FLOPs} = 4 \times (2 \times 128 + 2 \times 128) = 2{,}048
+   $$
+
+3. Divide:
+
+   $$
+   \frac{2{,}048 \text{ FLOPs}}{512 \text{ bytes}} = 4 \text{ FLOPs per byte}
+   $$
+
+4. A bigger batch adds more sequences, but each new sequence brings its own bytes **and** its own FLOPs. The ratio stays at 4.
+
+</Derivation>
+
+An intensity of 4 is far, far below the H100 ridge point of about 295. So attention in decode is always **memory-bound**: the speed of attention is simply the speed of reading the KV cache from HBM. The only ways to make it faster are to **read fewer bytes** (a smaller cache) or to **read them more efficiently** (better kernels). Both ideas come up again and again in the next chapters.
+
+<Callout type="real" title="Long contexts change where time goes">
+
+For short chats, most of each decode step is spent reading the weights. For long documents, long conversations or coding agents with big contexts, the KV cache can become the larger part. That is why long-context serving is so expensive, and why so much research goes into making the cache smaller.
+
+</Callout>
+
+## Try it yourself
+
+Use the explorer to see all of this at once. Start with **Llama 3.1 8B, 8K tokens, batch 32, BF16, one H100**: you should see 34.4 GB of KV cache and about 15 ms per step. Then try these:
+
+- Move the context to **128K** with batch 1. The KV cache becomes bigger than the model.
+- Switch to **Llama 2 7B**. The same settings now need 4× more KV cache.
+- Switch the KV format to **FP8**. The cache is half the size, and each step gets faster.
+- Pick **Llama 3.1 70B** on one H100. The weights do not even fit. Add GPUs until they do.
+
+<KvCacheGrowth model="l3-8b" context={8192} batch={32} />
+
+## Making the cache smaller and cheaper
+
+The KV cache is the main reason LLM serving is hard. So people attack it from many sides. Here is the map. Each tool is explained in detail in its own chapter.
+
+<Figure n="7.4" title="Tools against a big KV cache" caption="There are many ways to deal with the KV cache: store less per token, store fewer tokens, use fewer bytes per number, read it faster, waste no space, share it between requests, or move it to cheaper memory. Real systems combine several of them.">
+  <KvToolbox />
+</Figure>
+
+### Smaller numbers: an FP8 KV cache
+
+The simplest trick is to store the keys and values in **FP8** (1 byte) instead of BF16 (2 bytes). You learned about FP8 in [chapter 1.6](/gpu-hardware/number-formats). The cache becomes half the size, and every decode step reads half the KV bytes.
+
+<Derivation title="Users per H100 with an FP8 KV cache (Llama 3.1 8B, 8K tokens each)" result="About 96 users instead of 48, with the same GPU and the same model.">
+
+1. KV per token in FP8:
+
+   $$
+   2 \times 32 \times 8 \times 128 \times 1 = 65{,}536 \text{ bytes} = 64 \text{ KiB}
+   $$
+
+2. One 8K sequence:
+
+   $$
+   8{,}192 \times 65{,}536 \approx 0.537 \text{ GB}
+   $$
+
+3. The KV pool on one H100 is about 51.9 GB (from [chapter 1.8](/gpu-hardware/choosing-hardware)):
+
+   $$
+   \frac{51.9}{0.537} \approx 96 \text{ users}
+   $$
+
+</Derivation>
+
+In vLLM, this is one option: `--kv-cache-dtype fp8`. The quality loss is usually small, because keys and values tolerate rounding quite well, but it is not zero. Always test your model on your own tasks before you switch.
+
+<Callout type="warning">
+
+An FP8 KV cache needs attention kernels that can read FP8 keys and values, and it uses scale factors to keep the numbers in range. Support depends on the GPU, the engine version and the attention backend. Check the documentation of your engine before you rely on it.
+
+</Callout>
+
+### The other tools, in one line each
+
+- **Store fewer heads.** Share each key and value between several query heads (GQA, MQA), or compress them (MLA). This changes the model itself. Chapter [2.8](/inference-fundamentals/attention-variants).
+- **Keep only recent tokens.** Some layers only look at the last few thousand tokens (sliding-window attention), so their cache stops growing. Chapter [2.8](/inference-fundamentals/attention-variants).
+- **Read it faster.** Attention kernels like FlashAttention and FlashDecoding read the cache with as few trips to HBM as possible. Chapter [2.9](/inference-fundamentals/flash-attention).
+- **Waste no space.** Store the cache in small fixed-size blocks, so no memory is reserved but unused. Chapter [3.3](/serving-engines/paged-attention).
+- **Share common prefixes.** Many requests start with the same system prompt. Their keys and values are identical, so they can be computed once and shared. Chapter [3.7](/serving-engines/prefix-caching).
+- **Move it to cheaper memory.** Old caches can move to CPU memory or SSD and come back when needed, instead of being computed again. Chapter [3.13](/serving-engines/lmcache).
+
+<DeepDive title="Attention FLOPs: the part the 2 × P rule leaves out">
+
+In [chapter 1.1](/gpu-hardware/what-is-inference) we said one token needs about $2 \times P$ FLOPs, and that this rule ignores attention. Now we can add attention back.
+
+For one new token, in one layer, each of the $H_q$ query heads compares its query with $T$ cached keys ($2 \times d$ FLOPs each) and mixes $T$ cached values ($2 \times d$ FLOPs each). Over all $L$ layers:
+
+$$
+\text{attention FLOPs per token} = 4 \times T \times d_{head} \times H_q \times L
+$$
+
+For Llama 3.1 8B ($d_{head} = 128$, $H_q = 32$, $L = 32$):
+
+$$
+4 \times T \times 128 \times 32 \times 32 = 524{,}288 \times T
+$$
+
+At $T = 8{,}192$ that is about **4.3 GFLOPs**, compared with **16 GFLOPs** for the weights. At what context does attention cost as much as all the weights?
+
+$$
+524{,}288 \times T = 16.06 \times 10^{9} \quad \Rightarrow \quad T \approx 30{,}600 \text{ tokens}
+$$
+
+So for contexts above about 30K tokens, attention needs more FLOPs per token than all the matrix multiplications with the weights. Note: these FLOPs are for **reading the cache**, which has very low intensity, so in decode the real cost is the **bytes**, not the FLOPs. In prefill, where many queries share the same keys, these FLOPs really are computed, and they grow with $T^2$ over the whole prompt. That is exactly the problem FlashAttention ([chapter 2.9](/inference-fundamentals/flash-attention)) works on.
+
+</DeepDive>
+
+<DeepDive title="How engines lay out the cache in memory">
+
+A naive engine would reserve, for each request, one big contiguous array big enough for the **maximum** context length: for Llama 3.1 8B and a 128K limit, 17.2 GB per request, even if the request only uses 500 tokens. This wastes huge amounts of memory.
+
+Modern engines instead create, at startup, one big **pool** of fixed-size **blocks**. In vLLM a block holds the keys and values of a small number of tokens (16 by default) for every layer. A request gets blocks one at a time, only when it needs more space, and a **block table** records which blocks belong to which request, in order. The attention kernel follows the block table to find the keys and values. Because blocks do not need to be next to each other, almost no memory is wasted. This is **PagedAttention**, and it is the heart of vLLM. Chapter [3.3](/serving-engines/paged-attention) explains it step by step.
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="Why can the keys and values of old tokens be saved and re-used, but the query cannot be re-used?">
+
+Because attention is causal: an old token never looks at later tokens, so its keys and values never change and stay correct forever. The query of a token is only used once, when that token itself is processed. Later tokens use the old token's key and value, never its query.
+
+</Quiz>
+
+<Quiz n={2} q="A model has 40 layers, 8 KV heads and a head size of 128. What is its KV cache per token in FP8?">
+
+$2 \times 40 \times 8 \times 128 \times 1 = 81{,}920$ bytes $= 80$ KiB. In BF16 it would be twice that: 160 KiB.
+
+</Quiz>
+
+<Quiz n={3} q="You double the batch size in decode. Why does the weight part of each step get more efficient, but the attention part does not?">
+
+The weights are read once per step and shared by all sequences, so twice the batch does twice the useful math for the same bytes: the intensity doubles. The KV cache is different: each sequence reads its own keys and values, so twice the batch also means twice the bytes. The intensity of attention stays at about 4 FLOPs per byte for Llama 3.1 8B.
+
+</Quiz>
+
+<Quiz n={4} q="With a KV cache, the model does about 400× less work for a long answer, but the answer is only about 4× faster. Why?">
+
+Without a cache, each step processes many tokens and is compute-bound. With a cache, each decode step processes only one token per sequence, and it is limited by memory bandwidth: reading all weights takes about 4.8 ms per step on an H100, no matter how few FLOPs are needed. The cache removes most of the math, but the memory reading remains.
+
+</Quiz>
+
+<Quiz n={5} q="A user has a 64K-token conversation with Llama 3.1 70B in BF16. How big is their KV cache?">
+
+$65{,}536 \times 327{,}680$ bytes $\approx 21.5$ GB. That is for one single user. Long conversations on big models need a lot of GPU memory just for the cache.
+
+</Quiz>
+
+<Takeaways>
+
+- Without a cache, every step recomputes the keys and values of all earlier tokens. The total work grows with $n^2$.
+- Attention is **causal**, so old keys and values never change. We compute them once and keep them: that is the **KV cache**. The query is used once and not kept.
+- **KV bytes per token = 2 × layers × KV heads × head size × bytes.** Llama 3.1 8B: 128 KiB. Llama 2 7B: 512 KiB, because it has 4× more KV heads.
+- The cache grows with **users × context**. For Llama 3.1 8B it passes the size of the model after about 122,500 tokens.
+- Every decode step must **read** the whole cache of every sequence. Decode attention has an intensity of about 4 FLOPs per byte, so it is always **memory-bound**, and batching does not help it.
+- Smaller numbers (FP8 KV), fewer KV heads, paged blocks, prefix sharing and offloading all fight the same enemy: the size of the KV cache.
+
+</Takeaways>
