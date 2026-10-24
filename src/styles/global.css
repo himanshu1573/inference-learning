@@ -191,6 +191,8 @@ code,
 kbd,
 pre {
   font-family: var(--font-mono);
+  /* JetBrains Mono would draw "<|" and "|>" (special tokens) as arrows. */
+  font-variant-ligatures: none;
 }
 
 ::selection {
