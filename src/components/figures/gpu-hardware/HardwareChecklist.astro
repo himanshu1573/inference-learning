@@ -1,0 +1,24 @@
+---
+// The five questions to ask, in order, when choosing hardware.
+const steps = [
+  { q: 'Does it fit?', d: 'weights + overhead + some KV cache ≤ usable memory' },
+  { q: 'Is it fast enough?', d: 'decode speed ≈ bandwidth ÷ weight bytes' },
+  { q: 'Enough users and context?', d: 'users ≈ KV room ÷ KV per user' },
+  { q: 'What does it cost?', d: 'cost per token = price per hour ÷ tokens per hour' },
+  { q: 'Does the software support it?', d: 'engine, kernels, number formats, drivers' },
+];
+const rowH = 66;
+---
+<svg viewBox="0 0 720 370" role="img" aria-label="Five questions in order: does it fit, is it fast enough, enough users and context, what does it cost, does the software support it">
+  <path d={`M46 40 V${32 + 4 * rowH}`} class="line-a" stroke-width="1.6" stroke-dasharray="5 5" />
+  {steps.map((s, i) => (
+    <g>
+      <circle cx="46" cy={40 + i * rowH} r="22" class={i === 0 ? 'fill-a' : 'box'} style={i === 0 ? '' : 'stroke: var(--accent); stroke-width: 1.8'} />
+      <text x="46" y={46 + i * rowH} class={i === 0 ? 'mono' : 'ta mono'} style={i === 0 ? 'fill: var(--on-accent)' : ''} font-size="16" font-weight="700" text-anchor="middle">{`0${i + 1}`}</text>
+      <rect x="84" y={12 + i * rowH} width="620" height="56" rx="10" class="box" />
+      <text x="102" y={36 + i * rowH} class="t" font-size="17" font-weight="700">{s.q}</text>
+      <text x="102" y={58 + i * rowH} class="t2 mono" font-size="13.5">{s.d}</text>
+    </g>
+  ))}
+  <text x="84" y="362" class="t3" font-size="14">If any answer is “no”: smaller format, more GPUs, or another GPU.</text>
+</svg>

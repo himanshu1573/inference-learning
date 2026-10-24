@@ -1,0 +1,19 @@
+---
+// How many 8K-token conversations fit in the KV cache pool of one H100 (Llama 3.1 8B).
+const cols = 16;
+const total = 48;
+const cell = 34;
+---
+<svg viewBox="0 0 720 230" role="img" aria-label="48 squares, each one conversation of 8,192 tokens, fit into the 51.9 GB KV cache pool">
+  <text x="20" y="26" class="t" font-size="13" font-weight="700">KV cache pool on one H100: ≈ 51.9 GB</text>
+  <text x="700" y="26" class="t3 mono" font-size="11" text-anchor="end">1 square = 1 user with 8K tokens (1.07 GB)</text>
+  <rect x="20" y="40" width={cols * 41 + 18} height="140" rx="12" class="box" />
+  {Array.from({ length: total }).map((_, i) => (
+    <rect x={30 + (i % cols) * 41} y={52 + Math.floor(i / cols) * 41} width={cell} height={cell} rx="6" class="teal" />
+  ))}
+  {Array.from({ length: total }).map((_, i) => (
+    <text x={30 + (i % cols) * 41 + cell / 2} y={52 + Math.floor(i / cols) * 41 + 21} class="tt mono" font-size="10" text-anchor="middle">{i + 1}</text>
+  ))}
+  <text x="20" y="206" class="t2" font-size="12">51.9 GB ÷ 1.07 GB ≈ <tspan class="tt mono" font-weight="700">48 users</tspan> at the same time, each with a full 8K context.</text>
+  <text x="20" y="224" class="t3" font-size="11">Shorter conversations use less, so in practice more users fit. Longer ones (32K, 128K) use 4× or 16× more each.</text>
+</svg>

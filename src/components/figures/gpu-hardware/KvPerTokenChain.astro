@@ -1,0 +1,30 @@
+---
+// KV cache per token as a chain of multiplications, for Llama 3.1 8B.
+const items = [
+  { v: '2', l1: 'K and V', l2: 'two vectors' },
+  { v: '32', l1: 'layers', l2: 'each layer saves its own' },
+  { v: '8', l1: 'KV heads', l2: 'per layer' },
+  { v: '128', l1: 'numbers', l2: 'per head' },
+  { v: '2', l1: 'bytes', l2: 'per number (BF16)' },
+];
+---
+<svg viewBox="0 0 720 230" role="img" aria-label="KV cache per token equals 2 times 32 layers times 8 heads times 128 numbers times 2 bytes, which is 131,072 bytes or 128 KiB">
+  <text x="20" y="26" class="t" font-size="13" font-weight="700">For every token the model has seen, it keeps:</text>
+  {items.map((it, i) => (
+    <g>
+      <rect x={20 + i * 112} y="48" width="92" height="92" rx="12" class={i === 0 ? 'box-a' : 'box'} />
+      <text x={66 + i * 112} y="96" class="ta mono" font-size="26" font-weight="700" text-anchor="middle">{it.v}</text>
+      <text x={66 + i * 112} y="120" class="t" font-size="12" font-weight="600" text-anchor="middle">{it.l1}</text>
+      <text x={66 + i * 112} y="160" class="t3" font-size="10.5" text-anchor="middle">{it.l2}</text>
+      {i < items.length - 1 && <text x={122 + i * 112} y="100" class="t3" font-size="18" text-anchor="middle">×</text>}
+    </g>
+  ))}
+  <text x="586" y="100" class="t3" font-size="18" text-anchor="middle">=</text>
+  <rect x="600" y="48" width="104" height="92" rx="12" class="teal" stroke-width="1.4" />
+  <text x="652" y="88" class="tt mono" font-size="15" font-weight="700" text-anchor="middle">131,072</text>
+  <text x="652" y="106" class="tt" font-size="11" text-anchor="middle">bytes</text>
+  <text x="652" y="126" class="tt mono" font-size="12.5" font-weight="700" text-anchor="middle">= 128 KiB</text>
+
+  <rect x="20" y="182" width="684" height="34" rx="8" class="box2" />
+  <text x="362" y="204" class="t2" font-size="12" text-anchor="middle">A conversation of <tspan class="t" font-weight="700">8,192 tokens</tspan> needs 8,192 × 128 KiB = <tspan class="tt" font-weight="700">1 GiB (≈ 1.07 GB)</tspan> of KV cache</text>
+</svg>

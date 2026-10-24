@@ -1,0 +1,53 @@
+---
+// Room left for KV cache (GB) for each model and hardware choice.
+// room = n × mem × 0.9 − 4 GB × n − weights. Negative = does not fit.
+const hw = [
+  { name: '1 × L40S', mem: 48, n: 1 },
+  { name: '1 × H100', mem: 80, n: 1 },
+  { name: '1 × H200', mem: 141, n: 1 },
+  { name: '4 × H100', mem: 80, n: 4 },
+  { name: '8 × H100', mem: 80, n: 8 },
+  { name: '8 × H200', mem: 141, n: 8 },
+];
+const models = [
+  { name: '8B · BF16', w: 16.06 },
+  { name: '70B · FP8', w: 70.6 },
+  { name: '70B · BF16', w: 141.2 },
+  { name: '405B · FP8', w: 405.9 },
+  { name: '405B · BF16', w: 811.8 },
+];
+const colW = 94;
+const x0 = 156;
+const rowH = 46;
+const y0 = 80;
+function cell(h: (typeof hw)[number], m: (typeof models)[number]) {
+  const room = h.n * h.mem * 0.9 - 4 * h.n - m.w;
+  return room;
+}
+---
+<svg viewBox="0 0 720 345" role="img" aria-label="Table of models and hardware showing how much memory is left for the KV cache, or a cross when the model does not fit">
+  <text x="20" y="24" class="t" font-size="15" font-weight="700">GB left for the KV cache (90% use, 4 GB overhead per GPU)</text>
+  {hw.map((h, j) => (
+    <g>
+      <text x={x0 + j * colW + colW / 2} y="50" class="t mono" font-size="13" font-weight="600" text-anchor="middle">{h.name}</text>
+      <text x={x0 + j * colW + colW / 2} y="64" class="t3 mono" font-size="12" text-anchor="middle">{h.n * h.mem} GB</text>
+    </g>
+  ))}
+  {models.map((m, i) => (
+    <g>
+      <text x="20" y={y0 + i * rowH + 22} class="t" font-size="14" font-weight="700">{m.name}</text>
+      <text x="20" y={y0 + i * rowH + 38} class="t3 mono" font-size="11.5">{m.w.toFixed(0)} GB weights</text>
+      {hw.map((h, j) => {
+        const r = cell(h, m);
+        const ok = r > 0;
+        return (
+          <g>
+            <rect x={x0 + j * colW + 4} y={y0 + i * rowH + 4} width={colW - 8} height={rowH - 8} rx="7" class={ok ? 'green' : 'red'} stroke-width="1" />
+            <text x={x0 + j * colW + colW / 2} y={y0 + i * rowH + 28} class={ok ? 'tg mono' : 'tr mono'} font-size="15" font-weight="700" text-anchor="middle">{ok ? `✓ ${r.toFixed(0)}` : '✗'}</text>
+          </g>
+        );
+      })}
+    </g>
+  ))}
+  <text x="20" y="338" class="t3" font-size="13">✓ = fits, with that many GB left for the KV cache. ✗ = does not fit.</text>
+</svg>
