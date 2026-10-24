@@ -1,0 +1,431 @@
+---
+title: 'Kernel Fusion and CUDA Graphs'
+description: 'Why launching many small GPU programs is slow, and how kernel fusion, CUDA Graphs and torch.compile keep the GPU busy all the time.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import KgLaunch from '../../../components/figures/inference-fundamentals/KgLaunch.astro';
+import KgLayerKernels from '../../../components/figures/inference-fundamentals/KgLayerKernels.astro';
+import KgTimeline from '../../../components/figures/inference-fundamentals/KgTimeline.astro';
+import KgFusion from '../../../components/figures/inference-fundamentals/KgFusion.astro';
+import KgBuckets from '../../../components/figures/inference-fundamentals/KgBuckets.astro';
+
+In Phase 1 we learned that one decode step of Llama 3.1 8B on an H100 needs about **4.8 ms**, because the GPU must read 16 GB of weights. That number assumes something important: that the GPU is **busy all the time**. In real programs, this is often not true. The GPU spends part of its time doing nothing, just **waiting for the CPU** to tell it what to do next.
+
+This chapter explains where that waiting comes from, and the three tools that remove it: **kernel fusion**, **CUDA Graphs** and **compilers** like `torch.compile`. Every serving engine (vLLM, SGLang, TensorRT-LLM) uses all three.
+
+<NewWords
+  words={[
+    { word: 'Kernel', meaning: 'One function that runs on the GPU, for example "multiply these two matrices". A model step runs hundreds of kernels.' },
+    { word: 'Launch', meaning: 'The act of the CPU telling the GPU: "run this kernel now, with these inputs".' },
+    { word: 'Launch overhead', meaning: 'The time the CPU needs for each launch. A few microseconds, but it adds up.' },
+    { word: 'Host and device', meaning: 'Host = the CPU and its memory. Device = the GPU and its memory.' },
+    { word: 'Kernel fusion', meaning: 'Joining several small kernels into one bigger kernel, so data stays on the chip and there are fewer launches.' },
+    { word: 'CUDA Graph', meaning: 'A recording of many kernel launches that the GPU can replay with one single launch.' },
+    { word: 'Eager mode', meaning: 'The normal PyTorch way: each operation is launched as soon as Python reaches that line.' },
+    { word: 'Triton', meaning: 'A Python-like language for writing GPU kernels. torch.compile uses it to generate fused kernels.' },
+  ]}
+/>
+
+## The simple picture: a manager and a fast team
+
+Imagine a very fast team of 1,000 workers (the GPU) and one manager (the CPU). The workers do nothing on their own. For every task, the manager must walk over and say: "Now do this." Each instruction takes the manager a few seconds.
+
+If a task takes the team one hour, the few seconds of instruction do not matter. But what if the team finishes each task in **two seconds**? Then the team spends most of the day **waiting for the manager**. The team is fast, but the work goes slowly.
+
+<Callout type="analogy" title="The bottleneck moves">
+
+When the work is big, the workers are the bottleneck. When the work is cut into many tiny pieces, the **manager** becomes the bottleneck. LLM decode cuts the work into many tiny pieces. So in decode, the CPU, the "manager", can easily become the bottleneck.
+
+</Callout>
+
+There are two ways to fix this:
+
+1. **Give bigger tasks.** Join several small tasks into one. This is **kernel fusion**.
+2. **Give a written list once.** The manager writes all instructions on a list, and the team follows the list without waiting. This is a **CUDA Graph**.
+
+## What is a kernel?
+
+A GPU does not run a whole Python program. It runs small functions called **kernels**. Each kernel does one job on a lot of data, for example:
+
+- multiply a matrix of activations by a weight matrix,
+- apply the SiLU function to every number in a tensor,
+- add two tensors together.
+
+The CPU runs your Python code. Every time the code reaches a GPU operation, the CPU **launches** a kernel: it prepares the inputs, picks the kernel, and puts a "run this" message into a queue for the GPU. The GPU takes kernels from the queue **in order** and runs each one on all of its SMs.
+
+<Figure n="10.1" title="The CPU launches, the GPU runs" caption="The CPU places kernel launches in a queue called a CUDA stream. The GPU runs them one after another. Launching is asynchronous: the CPU does not wait for each kernel to finish, so it can launch the next one while the GPU is busy. Problems start when the CPU cannot launch as fast as the GPU finishes.">
+  <KgLaunch />
+</Figure>
+
+The important word is **asynchronous**. The CPU does not wait. It can launch kernel 2 while the GPU is still running kernel 1. As long as the CPU stays **ahead** of the GPU, the queue is never empty and the GPU is always busy. But if each kernel is very short, the GPU empties the queue faster than the CPU can fill it. Then the GPU waits.
+
+### How much does one launch cost?
+
+On the CPU side, one launch costs roughly **2 to 10 microseconds** (µs). This includes the CUDA driver work and, in PyTorch, the Python and framework code that runs for every operation. We will use **about 5 µs** as a round number. (1 µs is one millionth of a second, so 5 µs = 0.005 ms.)
+
+That sounds tiny. But a model step has a lot of kernels.
+
+## How many kernels does one decode step run?
+
+Let us count the kernels in one transformer layer of Llama 3.1 8B. In a simple PyTorch version written in eager mode, every small operation is its own kernel. RMSNorm alone is about six kernels: square, mean, add a small number, reciprocal square root, multiply, multiply by the weight. RoPE (the position trick from the embeddings chapter) is several more.
+
+<Figure n="10.2" title="Kernels in one layer" caption="A simple eager PyTorch layer runs about 30 small kernels. A serving engine like vLLM merges matrices (one QKV matmul instead of three, one gate_up matmul instead of two) and fuses small steps (residual add with RMSNorm, SiLU with multiply), so the same layer needs about 10 kernels. Exact counts change between versions.">
+  <KgLayerKernels />
+</Figure>
+
+Now we can do the math.
+
+<Derivation title="Launch time for one decode step of Llama 3.1 8B" result="Simple eager code: about 1,000 launches ≈ 4.9 ms of CPU time per step, as long as the GPU work itself (≈ 4.8 ms). Fused code: about 330 launches ≈ 1.7 ms.">
+
+1. Kernels per step in simple eager code: about 30 per layer, 32 layers, plus about 10 more for the embedding, the final norm, the output layer and sampling.
+
+   $$
+   30 \times 32 + 10 = 970 \approx 1{,}000 \text{ kernels}
+   $$
+
+2. CPU time to launch them at about 5 µs each.
+
+   $$
+   970 \times 5\ \mu\text{s} = 4{,}850\ \mu\text{s} \approx 4.9 \text{ ms}
+   $$
+
+3. GPU time for the step (from Phase 1: read 16 GB at 3.35 TB/s).
+
+   $$
+   \frac{16 \times 10^{9}}{3.35 \times 10^{12}} \approx 4.8 \text{ ms}
+   $$
+
+4. With fused kernels (about 10 per layer):
+
+   $$
+   (10 \times 32 + 10) \times 5\ \mu\text{s} = 330 \times 5\ \mu\text{s} \approx 1.7 \text{ ms}
+   $$
+
+</Derivation>
+
+Look at steps 2 and 3. In simple eager code, the CPU needs **as much time to launch** the kernels as the GPU needs to **run** them. The CPU has no time to spare. Any extra Python work (the scheduler, preparing inputs, detokenizing output) makes the GPU wait.
+
+### Small models suffer the most
+
+The problem is worse for small models. A small model has less data to read, so each kernel is shorter. But the number of kernels does not shrink as much.
+
+<Derivation title="A 1B model in eager mode on an H100" result="The GPU is busy only about 30% of the time. 70% of the time it waits for the CPU.">
+
+1. A 1-billion-parameter model like Llama 3.2 1B has about 1.24 billion parameters and 16 layers. In BF16 that is about 2.5 GB.
+
+   $$
+   \text{GPU time} = \frac{2.5 \times 10^{9}}{3.35 \times 10^{12}} \approx 0.74 \text{ ms}
+   $$
+
+2. Kernels in simple eager code: 30 per layer, 16 layers, plus about 10.
+
+   $$
+   30 \times 16 + 10 = 490 \text{ kernels}
+   $$
+
+3. CPU launch time.
+
+   $$
+   490 \times 5\ \mu\text{s} \approx 2.45 \text{ ms}
+   $$
+
+4. The step cannot finish before the CPU has launched everything. So the step takes about 2.45 ms, but the GPU works only 0.74 ms of it.
+
+   $$
+   \frac{0.74}{2.45} \approx 0.30 = 30\% \text{ busy}
+   $$
+
+</Derivation>
+
+<KeyNumbers
+  items={[
+    { value: '≈ 5 µs', label: 'CPU cost of one kernel launch' },
+    { value: '≈ 1,000', label: 'kernels per decode step, simple eager 8B model' },
+    { value: '≈ 4.9 ms', label: 'just to launch them' },
+    { value: '30%', label: 'GPU busy time, eager 1B model' },
+  ]}
+/>
+
+So the "4.8 ms" from Phase 1 is a **best case** that we only reach if the CPU side is fast. The rest of this chapter is about reaching it.
+
+## Tool 1: kernel fusion
+
+**Kernel fusion** means writing one kernel that does the work of several. It helps in two ways:
+
+1. **Fewer launches.** Two kernels become one, so the CPU cost is cut.
+2. **Fewer trips to HBM.** This is often the bigger win. Without fusion, every kernel reads its input from HBM and writes its output back to HBM, even if the next kernel needs it immediately. With fusion, the in-between result stays in **registers** (the fastest memory, inside each SM) and never touches HBM.
+
+Remember the memory hierarchy chapter: HBM is slow compared with the chip. Small elementwise operations, like "apply SiLU to every number", do almost no math. They are **pure memory traffic**. Removing a round trip to HBM makes them faster almost one-for-one.
+
+### A real example: SwiGLU in the MLP
+
+The MLP block of Llama computes:
+
+$$
+\text{out} = \text{SiLU}(\text{gate}) \times \text{up}
+$$
+
+Here `gate` and `up` are two tensors with 14,336 numbers per token (the MLP size of Llama 3.1 8B). Without fusion, this is two kernels: first SiLU, then multiply. With fusion, it is one kernel.
+
+<Figure n="10.3" title="Fusing SiLU and multiply" caption="Without fusion, the result of SiLU (tmp) is written to HBM and then read back by the multiply kernel. With fusion, one kernel reads gate and up, computes SiLU(gate) × up in registers, and writes only the output. The two extra trips for tmp disappear.">
+  <KgFusion />
+</Figure>
+
+<Derivation title="Memory traffic saved by fusing SwiGLU, prefill of 4,096 tokens" result="Fusion moves 352 MB instead of 587 MB per layer: 40% less traffic, about 2.2 ms saved over 32 layers.">
+
+1. Size of one tensor (gate, up, tmp or out) for 4,096 tokens in BF16 (2 bytes):
+
+   $$
+   S = 4{,}096 \times 14{,}336 \times 2 \approx 117.4 \text{ MB}
+   $$
+
+2. Without fusion, the bytes moved are: read gate, write tmp, read tmp, read up, write out.
+
+   $$
+   5 \times S = 5 \times 117.4 \approx 587 \text{ MB}
+   $$
+
+3. With fusion: read gate, read up, write out.
+
+   $$
+   3 \times S = 3 \times 117.4 \approx 352 \text{ MB}
+   $$
+
+4. Time at 3.35 TB/s, per layer.
+
+   $$
+   \frac{587 \times 10^{6}}{3.35 \times 10^{12}} \approx 175\ \mu\text{s} \quad \text{vs} \quad \frac{352 \times 10^{6}}{3.35 \times 10^{12}} \approx 105\ \mu\text{s}
+   $$
+
+5. Over 32 layers:
+
+   $$
+   32 \times (175 - 105)\ \mu\text{s} = 32 \times 70\ \mu\text{s} \approx 2.2 \text{ ms saved}
+   $$
+
+</Derivation>
+
+This is one small operation. A real engine fuses many of them. Here are common fusions you will find in vLLM and SGLang:
+
+| Fused kernel | What it joins | Why it helps |
+| --- | --- | --- |
+| Fused add + RMSNorm | residual add, then all the RMSNorm steps | about 7 kernels become 1; the residual is read once |
+| SiLU-and-multiply | SiLU(gate) × up | one launch; no tmp tensor in HBM |
+| Merged QKV matmul | three projections (Q, K, V) | one bigger matrix multiply is more efficient than three small ones |
+| Merged gate_up matmul | two MLP projections | same reason as QKV |
+| Rotary embedding | all the RoPE steps for Q and K | about 6 kernels become 1 |
+| Attention (FlashAttention) | scores, softmax, weighted sum | the big score matrix never goes to HBM (see the FlashAttention chapter) |
+
+<Callout type="idea">
+
+**FlashAttention is the most famous kernel fusion.** Naive attention writes a huge matrix of scores to HBM, reads it back for softmax, writes it again, and reads it again. FlashAttention fuses all of these steps so the scores stay on the chip. The idea is the same as in our small SwiGLU example, just much bigger.
+
+</Callout>
+
+<Callout type="warning" title="Fusion does not make matrix multiplies cheaper">
+
+The big matrix multiplies (QKV, O, gate_up, down) read the weights. That is the 16 GB that sets the 4.8 ms floor. Fusion cannot reduce it: the weights must be read once per step anyway. Fusion removes the **extra** traffic and launches **around** the matrix multiplies. To read fewer weight bytes, you need quantization (next chapter).
+
+</Callout>
+
+## Tool 2: CUDA Graphs
+
+Fusion reduces the number of kernels from about 1,000 to about 330 per step. That is better, but 330 launches still cost about 1.7 ms of CPU time. Can we remove almost all of it?
+
+Yes. Notice that **every decode step runs exactly the same kernels**, in the same order, with the same shapes. Only the numbers inside the tensors change. So why should the CPU decide the same thing again and again, 100 times per second?
+
+A **CUDA Graph** is a recording. You run one step while the GPU **records** all the kernel launches into a graph. After that, you can **replay** the whole graph with **one** launch. The GPU then runs all the recorded kernels back to back, with no CPU work between them.
+
+<Figure n="10.4" title="Eager launches vs a CUDA Graph" caption="Top: in eager mode the CPU launches each kernel (orange blocks), and short GPU kernels (blue blocks) leave gaps where the GPU waits. Bottom: with a CUDA Graph, one replay launch starts all kernels, and they run back to back. The GPU work is the same; the idle gaps disappear.">
+  <KgTimeline />
+</Figure>
+
+This is what a GPU profiler (like NVIDIA Nsight Systems) shows you. Engineers look at exactly this kind of picture: if the GPU row has many gaps, the CPU is the bottleneck.
+
+### How it looks in PyTorch
+
+```python
+import torch
+
+# Fixed buffers: a graph always uses the same memory addresses.
+static_input = torch.zeros(16, 4096, device="cuda", dtype=torch.bfloat16)
+
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph):          # record (after a few warm-up runs)
+    static_output = model_step(static_input)
+
+# Every decode step after that:
+static_input.copy_(new_input)          # put new numbers into the same buffer
+graph.replay()                         # ONE launch runs all recorded kernels
+next_token_logits = static_output
+```
+
+### The catch: everything must be fixed
+
+A CUDA Graph is like a video recording. You cannot change what happens inside it. When you replay it:
+
+- The **shapes** must be the same as when it was recorded. A graph recorded for 16 sequences only works for 16 sequences.
+- The **memory addresses** must be the same. That is why the code copies new data **into** the old buffer instead of making a new tensor.
+- There can be **no CPU decisions inside**: no Python `if` that looks at GPU values, no printing, no waiting for the GPU.
+
+But in a serving engine, the number of running requests changes all the time: 13 now, 20 a moment later, 7 after that. How can a fixed recording work?
+
+### The solution: record a few sizes, then pad
+
+The engine records **several graphs at startup**, one for each of a list of batch sizes, for example 1, 2, 4, 8, 16, 24, 32 and so on up to a maximum. When 13 requests are running, it uses the graph for **16** and fills the 3 extra rows with dummy data. This is called **padding**.
+
+<Figure n="10.5" title="Batch-size buckets and padding" caption="The engine records graphs for a list of batch sizes at startup. A batch of 13 runs with the graph for 16; 3 slots are padding. The padded rows do useless math, but decode is memory-bound, so the step costs about the same.">
+  <KgBuckets />
+</Figure>
+
+Why is padding almost free? From the roofline chapter: at small batch sizes, decode is **memory-bound**. The time is set by reading the weights, which happens once no matter if the batch has 13 or 16 rows. The extra math for 3 rows is tiny.
+
+<Callout type="real" title="CUDA Graphs in vLLM">
+
+vLLM uses CUDA Graphs by default for decode. It records them at startup for a list of batch sizes (you can see "capturing CUDA graphs" in the startup logs). The recording takes some time at startup and uses some GPU memory. You can turn graphs off with the `--enforce-eager` flag, which is useful for debugging, but decode becomes slower, especially for small models.
+
+</Callout>
+
+<DeepDive title="Why attention makes CUDA Graphs tricky (piecewise graphs)">
+
+Most kernels in a decode step have shapes that depend only on the batch size: a matrix multiply for 16 tokens always looks the same. **Attention is different.** Each request has its own length: one has seen 50 tokens, another 3,000. The attention kernel must know these lengths and where each request's KV cache lives in memory. This information changes every step.
+
+There are two ways to handle this:
+
+1. **Piecewise graphs.** Record the parts **between** attention calls as graphs, and run attention itself outside the graph, in eager mode. In vLLM V1, the model is compiled with `torch.compile` and split at the attention operations; the pieces between them are captured as CUDA Graphs. You lose a little (one launch per attention call), but you keep most of the benefit.
+
+2. **Full graphs.** Some attention kernels are written so that all the varying information (lengths, block tables) is read from **fixed buffers** in GPU memory. The CPU writes new values into those buffers before the replay, and the kernel reads them at run time. Then attention can be inside the graph too. Newer versions of vLLM support full graphs for some attention backends.
+
+The general rule: anything that changes between steps must live in a **fixed buffer**, not in the shape of the graph.
+
+</DeepDive>
+
+## Tool 3: compilers (torch.compile and Triton)
+
+Writing fused kernels by hand is hard work. Each fusion needs CUDA code, testing and tuning. **Compilers** can do part of this work automatically.
+
+### torch.compile
+
+`torch.compile` is a function in PyTorch. You give it your model, and it:
+
+1. **Captures** your Python code as a graph of operations (a tool called TorchDynamo does this).
+2. **Finds** operations that can be joined, like a chain of elementwise operations.
+3. **Generates** new fused kernels for them, written in **Triton** (a tool called TorchInductor does this).
+
+```python
+model = torch.compile(model)                          # fuse small operations
+model = torch.compile(model, mode="reduce-overhead")  # also use CUDA Graphs
+```
+
+The first call is slow, because the compiler is working. After that, the compiled model runs faster.
+
+### Triton
+
+**Triton** is a language, created at OpenAI, for writing GPU kernels in a Python-like style. In CUDA, you write code for **one thread**. In Triton, you write code for a **block** of data, and the compiler decides how threads share the work. This makes kernels much easier to write. Many kernels in vLLM and SGLang are written in Triton.
+
+<DeepDive title="A fused SiLU-and-multiply kernel in Triton">
+
+Here is a complete Triton kernel for our SwiGLU example. Each "program" handles one block of 1,024 numbers.
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def silu_mul_kernel(gate_ptr, up_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)                      # which block am I?
+    offs = pid * BLOCK + tl.arange(0, BLOCK)    # positions of my numbers
+    mask = offs < n                             # do not go past the end
+    g = tl.load(gate_ptr + offs, mask=mask).to(tl.float32)
+    u = tl.load(up_ptr + offs, mask=mask).to(tl.float32)
+    y = g * tl.sigmoid(g) * u                   # SiLU(g) × u, in registers
+    tl.store(out_ptr + offs, y.to(out_ptr.dtype.element_ty), mask=mask)
+
+# Launch enough programs to cover all n numbers:
+# silu_mul_kernel[(triton.cdiv(n, 1024),)](gate, up, out, n, BLOCK=1024)
+```
+
+Look at what is **not** there: no temporary tensor. `g * tl.sigmoid(g)` exists only in registers. The kernel reads two tensors and writes one: exactly the "3 trips" from Figure 10.3. Notice also that the math happens in FP32 for accuracy, but the data in HBM stays in BF16.
+
+</DeepDive>
+
+### The kernel landscape
+
+A serving engine does not write every kernel itself. It mixes kernels from several libraries:
+
+| Library | What it provides |
+| --- | --- |
+| **cuBLAS** | NVIDIA's library for matrix multiplication. The default for big matmuls. |
+| **CUTLASS** | NVIDIA's C++ templates for building custom, fused matrix multiplies (for example, FP8 matmuls with scaling). |
+| **FlashAttention** | Fast, fused attention kernels (FlashAttention 2 and 3). |
+| **FlashInfer** | A library of attention and sampling kernels for serving, used by vLLM and SGLang. |
+| **Triton kernels** | Custom fused kernels written in Triton, by the engine or generated by torch.compile. |
+
+You do not need to know all of them. The idea to remember: **a fast engine is mostly a collection of carefully chosen and fused kernels, launched with as little CPU work as possible.**
+
+## The CPU is part of the system
+
+Even with fusion and CUDA Graphs, the CPU still has work to do in every step. A serving engine must:
+
+- decide which requests run in this step (the **scheduler**),
+- prepare the input tensors (token IDs, positions, KV cache block tables),
+- receive the output token, turn it into text (**detokenize**) and send it to the user,
+- handle new requests arriving over the network.
+
+If all this runs in **one Python thread** between GPU steps, the GPU waits for it. For a fast GPU and a small model, this CPU time can be a large part of each step. Modern engines fight this in several ways: they run the API server, the scheduler and the GPU worker in **separate processes**, and they prepare step N+1 on the CPU **while** the GPU runs step N. We study these designs in Phase 3, in the vLLM architecture chapter.
+
+<Callout type="idea">
+
+**Remember the order of costs.** First the GPU must read the weights (the memory floor). Then the CPU must not slow it down (launches and scheduling). Fusion and CUDA Graphs do not make the floor lower. They make sure you actually **reach** the floor.
+
+</Callout>
+
+## Check yourself
+
+<Quiz n={1} q="Kernel launches are asynchronous. Why can launch overhead still slow the GPU down?">
+
+Because the CPU must stay ahead of the GPU. If each kernel runs on the GPU for less time than the CPU needs to launch the next one, the queue becomes empty and the GPU waits. This happens in decode, where many kernels are very short.
+
+</Quiz>
+
+<Quiz n={2} q="Fusing two elementwise kernels removes how many trips to HBM, and why?">
+
+Two trips. The first kernel no longer writes its temporary result to HBM, and the second kernel no longer reads it back. The temporary result stays in registers inside the fused kernel.
+
+</Quiz>
+
+<Quiz n={3} q="Why does a CUDA Graph only work for fixed shapes?">
+
+A CUDA Graph is a recording of exact kernel launches, with their shapes and memory addresses. Replaying it repeats exactly the same work. If the batch size changes, the recorded kernels no longer match the data, so the engine records graphs for a list of sizes and pads the batch up to the next recorded size.
+
+</Quiz>
+
+<Quiz n={4} q="A batch of 21 requests runs with the CUDA Graph recorded for 24. Is the padding expensive?">
+
+Usually no. At small batch sizes, decode is memory-bound: the step time is set by reading the weights, which happens once whether there are 21 or 24 rows. The 3 extra rows add a small amount of math, which is cheap when the GPU is waiting for memory anyway.
+
+</Quiz>
+
+<Quiz n={5} q="Can kernel fusion make a decode step of Llama 3.1 8B faster than 4.8 ms on an H100 at batch 1?">
+
+No. 4.8 ms is the time to read the 16 GB of weights once, and every step must do that. Fusion removes extra traffic and launches, so the real step time gets **closer** to 4.8 ms, but not below it. To go below, you must read fewer bytes, for example with quantization.
+
+</Quiz>
+
+<Takeaways>
+
+- A **kernel** is one GPU function. The **CPU launches** every kernel, at a cost of about **5 µs** each.
+- A simple eager decode step of an 8B model runs about **1,000 kernels**: launching them takes about as long as the GPU work. Small models suffer even more.
+- **Kernel fusion** joins small kernels: fewer launches and fewer HBM round trips (SwiGLU: 5 trips → 3 trips).
+- **CUDA Graphs** record a whole step and replay it with **one launch**. They need fixed shapes, so engines record a few batch sizes and **pad**.
+- **torch.compile** and **Triton** generate fused kernels automatically. These tools do not lower the memory floor; they help you **reach** it.
+
+</Takeaways>
