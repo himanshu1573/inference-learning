@@ -1,0 +1,371 @@
+---
+title: 'The GPU Memory Hierarchy'
+description: 'Registers, shared memory, L2 cache and HBM: where data lives inside a GPU server, how fast it moves, and why moving data costs more than doing math.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import KitchenAnalogy from '../../../components/figures/gpu-hardware/KitchenAnalogy.astro';
+import MemoryPyramid from '../../../components/figures/gpu-hardware/MemoryPyramid.astro';
+import HbmPackage from '../../../components/figures/gpu-hardware/HbmPackage.astro';
+import ReuseDiagram from '../../../components/figures/gpu-hardware/ReuseDiagram.astro';
+import LoadTimeBars from '../../../components/figures/gpu-hardware/LoadTimeBars.astro';
+
+In the first chapter we found a surprising fact. For one user, an H100 needs about **4.8 ms** to read the weights of Llama 3.1 8B, but only about **0.016 ms** to do the math. The GPU spends most of its time **waiting for data**.
+
+So where is the data, and why does it take so long to arrive? This chapter answers that question. We will open the GPU and look at its different kinds of memory, from tiny and very fast to huge and slow. By the end, you will understand why almost every speed trick in LLM serving is really a trick about **moving less data**.
+
+<NewWords
+  words={[
+    { word: 'Memory hierarchy', meaning: 'The different levels of memory in a computer, ordered from small and fast to big and slow.' },
+    { word: 'Capacity', meaning: 'How much data a memory can hold. Measured in bytes (KB, MB, GB, TB).' },
+    { word: 'Bandwidth', meaning: 'How much data a memory can deliver per second. Measured in bytes per second, like GB/s or TB/s.' },
+    { word: 'Latency', meaning: 'How long you wait for the first piece of data after you ask for it. Measured in nanoseconds (ns) or microseconds (µs).' },
+    { word: 'Register', meaning: 'The smallest and fastest memory. It sits right inside the processing units and holds the numbers being used right now.' },
+    { word: 'Shared memory', meaning: 'A small, very fast memory inside each SM. A group of threads can use it together.' },
+    { word: 'Cache', meaning: 'A small, fast memory that keeps a copy of recently used data, so the next use is faster.' },
+    { word: 'SRAM', meaning: 'Static RAM. Very fast memory built on the chip itself. Expensive per byte. Used for registers, shared memory and caches.' },
+    { word: 'DRAM / HBM', meaning: 'Dynamic RAM: cheaper, denser memory. HBM (High Bandwidth Memory) is a special kind of DRAM stacked right next to the GPU chip.' },
+    { word: 'PCIe', meaning: 'The standard connection between the GPU and the rest of the computer (CPU, memory, disks).' },
+  ]}
+/>
+
+## The simple picture: a kitchen
+
+Before we look at numbers, let us use a picture from daily life. Imagine a chef cooking in a busy kitchen.
+
+- The chef holds one or two things in their **hands**. They can use them instantly.
+- On the **cutting board** in front of them, there are a few more things. Very quick to reach.
+- On the **shelf** behind them, there is more. They need to turn around and take a step.
+- In the **big fridge** across the room, there is food for the whole week. They need to walk there and back.
+- If something is missing, someone must go to the **shop**. That takes a long time.
+- And the **warehouse** far away has everything, but the trip takes hours.
+
+<Figure n="4.1" title="A GPU server is like a kitchen" caption="Each level of the kitchen matches a level of memory in a GPU server. Close places are small but fast. Far places are big but slow. A good chef plans ahead so that the things they need are already close by.">
+  <KitchenAnalogy />
+</Figure>
+
+A good chef does not walk to the fridge for every single onion. They bring a whole bag of onions to the cutting board **once**, and then chop them all. As you will see, fast GPU programs do exactly the same thing with data.
+
+<Callout type="idea">
+
+Computer memory is always a trade-off: **you can have memory that is fast, or memory that is big, but not both at the same time.** So computers use several levels. They keep a little data close and fast, and a lot of data far and slow.
+
+</Callout>
+
+## Three numbers that describe any memory
+
+To compare memories, we use three numbers. Let us explain them with a road.
+
+1. **Capacity** is how much the memory can hold. Think of it as the size of a parking area. A bigger parking area holds more cars.
+2. **Bandwidth** is how much data can flow per second. Think of it as the **number of lanes** on the road. More lanes means more cars per second, even if each car drives at the same speed.
+3. **Latency** is the time for one piece of data to arrive after you ask for it. Think of it as the **length** of the road. A longer road means you wait longer for the first car.
+
+<Callout type="example" title="A truck vs a motorbike">
+
+You need to move 10,000 books to a library 10 km away. A **motorbike** arrives in 10 minutes but carries only 20 books per trip. That is low latency but low bandwidth. A **big truck** takes 30 minutes but carries all 10,000 books in one trip. That is high latency but very high bandwidth. For one book, the motorbike wins. For 10,000 books, the truck wins by far.
+
+</Callout>
+
+LLM inference is like moving 10,000 books. We must move **gigabytes of weights** for every token. So for us, **bandwidth is usually the most important number.** GPUs are also very good at hiding latency: while one group of threads waits for data, the GPU simply runs another group. (You saw how warps make this possible in the previous chapter.)
+
+## The levels, one by one
+
+Here is the full memory hierarchy of a GPU server. We use an **NVIDIA H100 SXM** as our example, because it is very common in data centres today.
+
+<Figure n="4.2" title="The memory pyramid of a GPU server" caption="Each level down is much bigger but slower to reach. The top three levels are built into the GPU chip itself. HBM sits next to the chip in the same package. CPU memory and SSDs are outside the GPU and must be reached through PCIe.">
+  <MemoryPyramid />
+</Figure>
+
+Let us walk down the pyramid, from the top.
+
+### Level 1: registers
+
+**Registers** are the fastest memory of all. They live right next to the math units. When a Tensor Core multiplies two numbers, those numbers come from registers, and the result goes back into a register.
+
+Each SM on an H100 has a **256 KB** register file. With 132 SMs, that is about 33 MB in total. That sounds like a lot, but this memory is split between thousands of threads. Each thread can only use a small number of registers.
+
+### Level 2: shared memory and L1 cache
+
+Each SM also has a block of fast on-chip memory of about **256 KB**. It is split into two parts, and the programmer can choose the split:
+
+- **Shared memory** (up to **228 KB** per SM): a scratch space that the programmer controls. The threads in one block can all read and write it. This is the cutting board of our chef.
+- **L1 cache**: the rest. The hardware fills it automatically with recently used data.
+
+Shared memory is the most important level for fast kernels. Programs like FlashAttention (Phase 2) are designed around it: they load a small piece of data into shared memory and use it many times before throwing it away.
+
+### Level 3: L2 cache
+
+The **L2 cache** is shared by all SMs on the chip. On the H100 it holds **50 MB**. When any SM reads data from HBM, the data passes through L2. If another SM needs the same data soon, it can get it from L2 instead of going all the way to HBM.
+
+50 MB is big for a cache, but small compared with an LLM. We will see in a moment what this means.
+
+### Level 4: HBM (the GPU's main memory)
+
+**HBM** is where the model lives. On an H100 it holds **80 GB** and delivers about **3.35 TB/s**. When people say "a GPU has 80 GB of memory", they mean HBM. The weights, the KV cache and all big data sit here.
+
+HBM is much bigger than the on-chip levels, but every byte must travel from HBM to the chip before it can be used. This trip is the speed limit we found in chapter 1.
+
+### Level 5: CPU memory
+
+The server also has normal computer memory (DRAM) attached to the CPU. A large server can have **1–2 TB** of it. This is much more than HBM. But the GPU cannot use it directly at full speed. Data must travel over **PCIe**, the link between the CPU and the GPU. A PCIe 5.0 link with 16 lanes moves about **64 GB/s** in each direction. That is about **50× slower** than HBM.
+
+### Level 6: SSD and network storage
+
+At the bottom are **NVMe SSDs** (fast disks inside the server) and network storage. A single fast SSD reads about **7 GB/s**. Storage on the network can be even slower. This is where model files are kept when the server is off.
+
+| Level | Where | Size (H100 server) | Bandwidth | Typical use in LLM serving |
+| --- | --- | --- | --- | --- |
+| Registers | inside each SM | 256 KB per SM | fastest | numbers being multiplied right now |
+| Shared memory / L1 | inside each SM | 256 KB per SM | ~33 TB/s (all SMs) | tiles of weights and activations |
+| L2 cache | on the chip | 50 MB | ~2× HBM | data shared between SMs |
+| HBM3 | next to the chip | 80 GB | 3.35 TB/s | weights, KV cache, activations |
+| CPU memory | on the motherboard | 1–2 TB | ~64 GB/s over PCIe 5 | offloaded KV cache, model loading |
+| NVMe SSD | in the server | 10+ TB | ~7 GB/s per drive | model files, cold KV cache |
+
+<Callout type="warning">
+
+These numbers are **approximate**. Different sources measure them in different ways, and the on-chip numbers (registers, shared memory, L2) are not always published by the vendor. What matters is the **size of the gaps**: each step down is roughly 10× to 1000× bigger, and much slower to reach.
+
+</Callout>
+
+<Derivation title="Can the model fit in the L2 cache?" result="No. The weights are 320× bigger than L2, so every decode step must read them from HBM again.">
+
+1. Size of the weights of Llama 3.1 8B in BF16 (from chapter 1).
+
+   $$
+   16 \text{ GB} = 16{,}000 \text{ MB}
+   $$
+
+2. Size of the H100 L2 cache.
+
+   $$
+   50 \text{ MB}
+   $$
+
+3. Compare.
+
+   $$
+   \frac{16{,}000 \text{ MB}}{50 \text{ MB}} = 320
+   $$
+
+</Derivation>
+
+So the cache cannot help us keep the weights close. In every decode step, all 16 GB must stream again from HBM into the chip. That is why HBM bandwidth decides decode speed.
+
+## Why not make all memory fast?
+
+If on-chip memory is so fast, why not build a GPU with 80 GB of it? The answer is **space and cost**.
+
+On-chip memory uses a design called **SRAM** (static RAM). One bit of SRAM needs about **6 transistors**. Main memory uses **DRAM** (dynamic RAM), which needs only **1 transistor and 1 tiny capacitor** per bit. So DRAM can pack many more bits into the same area, at a much lower price.
+
+<Callout type="analogy" title="A shop in the city centre">
+
+SRAM is like a shop in the city centre: very convenient, but each square metre is very expensive, so the shop is small. DRAM is like a big warehouse outside the city: cheap space and lots of room, but you need to drive there.
+
+</Callout>
+
+A GPU chip is already one of the largest chips humans can make. Filling it with SRAM would leave no space for the math units. So designers put a few tens of MB of SRAM on the chip, and many GB of DRAM next to it.
+
+## HBM: memory right next to the chip
+
+Normal computer memory sits on separate sticks, several centimetres away from the processor. Signals must travel along long wires on the board, and only a limited number of wires fit.
+
+**HBM (High Bandwidth Memory)** solves this in a clever way. Instead of placing memory chips side by side on the board, it **stacks** several DRAM chips on top of each other, like a pile of thin pancakes. The stacks sit right next to the GPU chip, on a thin piece of silicon called an **interposer**. Because everything is so close, engineers can use a huge number of short, parallel wires.
+
+<Figure n="4.3" title="How HBM is built" caption="Left: the HBM stacks sit around the GPU die, all on one silicon interposer. Right: each stack is a pile of DRAM chips connected with vertical wires, and the stack talks to the GPU through about a thousand short wires. More wires in parallel means more bandwidth.">
+  <HbmPackage />
+</Figure>
+
+Each HBM stack has a **1,024-bit** wide connection. A normal DDR memory stick has only 64 bits. That is the main reason HBM is so fast: it is not that each wire is much faster, it is that there are **many more wires** working at the same time. (In our road picture: more lanes.)
+
+<DeepDive title="Where does 3.35 TB/s come from?">
+
+The H100 SXM package has room for six HBM3 stacks, like in Figure 4.3, but only **5 of them are active** (that is how it gets 80 GB). Each stack has a 1,024-bit interface. So the total width of the memory bus is:
+
+$$
+5 \times 1{,}024 = 5{,}120 \text{ bits}
+$$
+
+Each wire sends about **5.2 billion bits per second** (5.2 Gbit/s). So the total is:
+
+$$
+5{,}120 \times 5.2 \times 10^{9} \text{ bits/s} \approx 26.6 \times 10^{12} \text{ bits/s}
+$$
+
+There are 8 bits in a byte:
+
+$$
+\frac{26.6 \times 10^{12}}{8} \approx 3.33 \times 10^{12} \text{ bytes/s} \approx 3.35 \text{ TB/s}
+$$
+
+This also explains how newer GPUs get faster memory. The H200 uses faster HBM3e and six stacks to reach about **4.8 TB/s**. The B200 uses eight HBM3e stacks to reach about **8 TB/s**. More stacks and faster wires mean more bandwidth, and also more capacity.
+
+(The per-wire speed here is a rounded value chosen to match the published bandwidth. The exact data rate depends on the product version.)
+
+</DeepDive>
+
+## Moving data costs more than math
+
+Now we come to the most important idea in this chapter. On a modern chip, **moving data is far more expensive than computing with it**, both in **time** and in **energy**.
+
+### The time cost
+
+We already measured the time cost in chapter 1, for one decode step of Llama 3.1 8B on an H100:
+
+<KeyNumbers
+  items={[
+    { value: '0.016 ms', label: 'to do the math for one token' },
+    { value: '4.8 ms', label: 'to read the weights from HBM' },
+    { value: '~300×', label: 'the memory trip is slower' },
+  ]}
+/>
+
+The math units could do 300 tokens' worth of work in the time it takes to deliver the data for one token. They are idle more than 99% of the time.
+
+### The energy cost
+
+Moving data also uses much more **energy**. A famous set of measurements by Mark Horowitz (2014, for a 45 nm chip) showed roughly:
+
+| Operation (32-bit) | Energy |
+| --- | --- |
+| Add two floating-point numbers | <span class="num">~0.9 pJ</span> |
+| Multiply two floating-point numbers | <span class="num">~3.7 pJ</span> |
+| Read from a small on-chip SRAM (8 KB) | <span class="num">~5 pJ</span> |
+| Read from off-chip DRAM | <span class="num">~640 pJ</span> |
+
+(pJ means picojoule, a tiny unit of energy: one millionth of one millionth of a joule.)
+
+Reading one number from DRAM costs about **170 times more energy** than multiplying it. Newer chips are more efficient, but the gap is still large. For a data centre with thousands of GPUs, this energy is a real cost on the electricity bill.
+
+<Callout type="idea">
+
+**The rule of the whole book:** math is cheap, moving data is expensive. A good GPU program does as much math as possible for each byte it brings in from HBM. In the next chapter we give this idea a name and a number: **arithmetic intensity**.
+
+</Callout>
+
+## Reuse: load once, use many times
+
+How do fast programs deal with expensive memory? Like our chef: they **bring data close once, then use it many times**.
+
+<Figure n="4.4" title="The power of reuse" caption="Left: if every use of a number needs a new trip to HBM, the program is slow. Right: if the number is loaded once into shared memory and used many times from there, most reads are fast on-chip reads.">
+  <ReuseDiagram />
+</Figure>
+
+Here is a concrete example. When a GPU multiplies two big matrices, it does not read each number from HBM again and again. Instead it works on small square pieces called **tiles**:
+
+1. Load a tile of 128 × 128 numbers from matrix A and a tile from matrix B into **shared memory**.
+2. Do all the multiplications that need these two tiles. Each number in the tile is used **128 times**.
+3. Move on to the next pair of tiles.
+
+So each byte read from HBM is used for many calculations. This is why a big matrix multiplication can keep the Tensor Cores busy, while a decode step (where each weight is used only once per token) cannot.
+
+<Callout type="real" title="You will meet this idea again and again">
+
+- **Batching** (Phase 3): serve many users in the same step, so each weight read from HBM is used for many tokens instead of one.
+- **FlashAttention** (Phase 2): split attention into tiles that fit in shared memory, so the huge attention matrix never goes to HBM at all.
+- **Kernel fusion** (Phase 2): do several steps while the data is still in registers, instead of writing it to HBM and reading it back.
+- **Quantization** (Phase 2): store numbers in fewer bytes, so the same weights mean less data to move.
+
+All four are reuse or "move fewer bytes" tricks.
+
+</Callout>
+
+## Below HBM: why loading a model is slow
+
+The bottom of the pyramid matters too, but at a different moment: **when a server starts**. Before the first request, the weights must travel from storage into HBM. How long does that take? It depends on where the weights come from.
+
+<Derivation title="Time to read 16 GB from each level" result="From 5 milliseconds (HBM) to 2 minutes (a slow network). This is why model startup can take minutes.">
+
+1. The rule is always the same: time = size ÷ bandwidth. The size is 16 GB, the weights of Llama 3.1 8B.
+
+   $$
+   t = \frac{16 \text{ GB}}{\text{bandwidth}}
+   $$
+
+2. From HBM (3.35 TB/s = 3,350 GB/s):
+
+   $$
+   \frac{16}{3{,}350} \text{ s} \approx 0.0048 \text{ s} = 4.8 \text{ ms}
+   $$
+
+3. From CPU memory over PCIe 5.0 (64 GB/s):
+
+   $$
+   \frac{16}{64} \text{ s} = 0.25 \text{ s}
+   $$
+
+4. From one NVMe SSD (7 GB/s):
+
+   $$
+   \frac{16}{7} \text{ s} \approx 2.3 \text{ s}
+   $$
+
+5. From network storage at 10 Gbit/s. First change bits to bytes: 10 Gbit/s ÷ 8 = 1.25 GB/s.
+
+   $$
+   \frac{16}{1.25} \text{ s} = 12.8 \text{ s}
+   $$
+
+</Derivation>
+
+<Figure n="4.5" title="Same 16 GB, very different waits" caption="Time to read the weights of Llama 3.1 8B from each place. The scale is logarithmic: each grid line means 10× more time. Bigger models take longer: a 70B model (140 GB) needs about 2 minutes even from a fast SSD.">
+  <LoadTimeBars />
+</Figure>
+
+In real life, loading is often even slower than these numbers. The program must also open files, check them and set up the GPU. And many teams download models from the internet or from cloud storage, which can take many minutes for big models.
+
+<Callout type="real" title="Why this matters in production">
+
+- When traffic grows and Kubernetes starts a new server, users wait until the model is loaded. Slow loading makes **autoscaling** slow. Phase 4 shows how teams cache models on local SSDs and use faster loaders.
+- When HBM is full, some engines move old **KV cache** data down to CPU memory or SSD, and bring it back later. This is cheaper than recomputing it, but it uses PCIe bandwidth. Tools like **LMCache** (Phase 3) are built for this.
+
+</Callout>
+
+## Check yourself
+
+<Quiz n={1} q="What is the difference between bandwidth and latency?">
+
+Bandwidth is how much data can be delivered per second (the number of lanes on a road). Latency is how long you wait for the first piece of data (the length of the road). A memory can have high bandwidth and still have high latency, like a big truck.
+
+</Quiz>
+
+<Quiz n={2} q="Why does every decode step of Llama 3.1 8B read all its weights from HBM, and not from the L2 cache?">
+
+Because the weights (16 GB) are about 320 times bigger than the H100's 50 MB L2 cache. They cannot stay in the cache, so they must stream from HBM again in every step.
+
+</Quiz>
+
+<Quiz n={3} q="Why is on-chip memory (SRAM) so small compared with HBM?">
+
+SRAM needs about 6 transistors per bit, while DRAM needs about 1 transistor and 1 capacitor. So SRAM takes much more chip area and costs much more per byte. The chip area is also needed for the math units.
+
+</Quiz>
+
+<Quiz n={4} q="HBM is not much faster per wire than normal memory. So why is its bandwidth so high?">
+
+Because it uses many more wires in parallel. Each HBM stack has a 1,024-bit connection (a normal memory stick has 64 bits), and the H100 uses 5 stacks, for a 5,120-bit bus. The stacks sit right next to the chip, which makes so many short wires possible.
+
+</Quiz>
+
+<Quiz n={5} q="A 70B model in BF16 is stored on network storage with 10 Gbit/s. About how long does it take just to read the file?">
+
+The model is 70 × 10⁹ × 2 bytes = 140 GB. The network moves 10 ÷ 8 = 1.25 GB/s. So the time is 140 ÷ 1.25 = **112 seconds**, almost 2 minutes, before any setup work.
+
+</Quiz>
+
+<Takeaways>
+
+- A GPU server has a **memory hierarchy**: registers, shared memory and L1, L2, HBM, CPU memory, SSD. Each level down is bigger but slower.
+- Three numbers describe a memory: **capacity**, **bandwidth** and **latency**. For LLM inference, **bandwidth** matters most.
+- The weights live in **HBM** (80 GB, 3.35 TB/s on an H100). They are far too big for the 50 MB L2 cache, so every decode step reads them from HBM.
+- **Moving data costs much more than math**, in time and in energy.
+- Fast programs **reuse** data: load it once into fast memory, use it many times. Batching, FlashAttention, fusion and quantization are all versions of this idea.
+
+</Takeaways>
