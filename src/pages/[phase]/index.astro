@@ -1,0 +1,140 @@
+---
+import Base from '../../layouts/Base.astro';
+import CircuitBg from '../../components/CircuitBg.astro';
+import LevelBadge from '../../components/LevelBadge.astro';
+import { phases, pad, levelNames, type Phase, type Level } from '../../data/curriculum';
+import { getReadyIds } from '../../lib/book';
+
+export function getStaticPaths() {
+  return phases.map((phase) => ({ params: { phase: phase.slug }, props: { phase } }));
+}
+
+interface Props { phase: Phase }
+const { phase } = Astro.props;
+const ready = await getReadyIds();
+const prev = phases.find((p) => p.num === phase.num - 1);
+const next = phases.find((p) => p.num === phase.num + 1);
+const first = phase.chapters[0];
+---
+<Base title={`Phase ${phase.num}: ${phase.title}`} description={phase.tagline} active="phases">
+  <section class="p-hero grid-bg">
+    <CircuitBg />
+    <div class="container p-inner">
+      <a href="/#roadmap" class="crumb mono">← All phases</a>
+      <span class="eyebrow">Phase {pad(phase.num)} of 05 · {phase.short}</span>
+      <h1>{phase.title}</h1>
+      <p class="lead">{phase.tagline}</p>
+      <div class="goal card bracket">
+        <span class="mono goal-l">You will be able to</span>
+        <p>{phase.goal}</p>
+      </div>
+      <div class="meta-line">
+        <span>{phase.chapters.length} chapters</span>
+        <span>{levelNames[Math.min(...phase.chapters.map((c) => c.level)) as Level]} → {levelNames[Math.max(...phase.chapters.map((c) => c.level)) as Level]}</span>
+        <span>{phase.chapters.filter((c) => ready.has(`${phase.slug}/${c.slug}`)).length} ready</span>
+        <span data-progress-phase={phase.slug} data-total={phase.chapters.length}>0 / {phase.chapters.length} read</span>
+      </div>
+      <a class="btn btn-primary" href={`/${phase.slug}/${first.slug}`}>Start with chapter 1 <span aria-hidden="true">→</span></a>
+    </div>
+  </section>
+
+  <section class="section chapters">
+    <div class="container narrow">
+      <ol class="ch-list">
+        {phase.chapters.map((c, i) => {
+          const id = `${phase.slug}/${c.slug}`;
+          const isReady = ready.has(id);
+          return (
+            <li data-chapter-id={id} class={isReady ? 'ready' : 'planned'}>
+              <a href={`/${id}`} class="ch card">
+                <span class="ch-n mono">{pad(phase.num)}.{pad(i + 1)}</span>
+                <span class="ch-main">
+                  <span class="ch-title">{c.title}</span>
+                  <span class="ch-sum">{c.summary}</span>
+                  <span class="ch-learn">{c.learn.map((l) => <span class="tag">{l}</span>)}</span>
+                </span>
+                <span class="side">
+                  <span class={`status mono ${isReady ? 's-ready' : 's-soon'}`}>{isReady ? 'Ready' : 'Soon'}</span>
+                  <LevelBadge level={c.level} />
+                </span>
+              </a>
+            </li>
+          );
+        })}
+      </ol>
+
+      <nav class="phase-nav">
+        {prev ? <a class="pn card" href={`/${prev.slug}`}><span class="mono">← Phase {pad(prev.num)}</span><strong>{prev.title}</strong></a> : <span />}
+        {next ? <a class="pn card right" href={`/${next.slug}`}><span class="mono">Phase {pad(next.num)} →</span><strong>{next.title}</strong></a> : <span />}
+      </nav>
+    </div>
+  </section>
+</Base>
+
+<script>
+  let read: string[] = [];
+  try {
+    read = JSON.parse(localStorage.getItem('llmbook-read') || '[]');
+  } catch {}
+  const done = new Set(read);
+  document.querySelectorAll<HTMLElement>('[data-chapter-id]').forEach((el) => {
+    if (done.has(el.dataset.chapterId!)) el.classList.add('done');
+  });
+  document.querySelectorAll<HTMLElement>('[data-progress-phase]').forEach((el) => {
+    const phase = el.dataset.progressPhase!;
+    const n = read.filter((id) => id.startsWith(phase + '/')).length;
+    el.textContent = `${n} / ${el.dataset.total} read`;
+  });
+</script>
+
+<style>
+  .p-hero { position: relative; overflow: hidden; padding: 72px 0 64px; border-bottom: 1px solid var(--border); }
+  .p-inner {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 18px;
+  }
+  .crumb { font-size: 12px; color: var(--text-3); }
+  h1 { font-size: clamp(36px, 6vw, 60px); font-weight: 800; letter-spacing: -0.035em; }
+  .lead { color: var(--text-2); font-size: 17px; max-width: 560px; }
+  .goal { padding: 16px 22px; max-width: 600px; text-align: left; }
+  .goal-l { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent-text); }
+  .goal p { margin-top: 6px; font-weight: 500; }
+  .narrow { max-width: 860px; }
+  .ch-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  .ch {
+    display: grid;
+    grid-template-columns: 64px 1fr auto;
+    gap: 16px;
+    padding: 20px 22px;
+    color: inherit;
+    text-decoration: none !important;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .ch:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .ch-n { font-size: 13px; font-weight: 600; color: var(--accent-text); padding-top: 3px; }
+  .ch-main { display: flex; flex-direction: column; gap: 6px; }
+  .ch-title { font-weight: 700; font-size: 17px; }
+  .ch-sum { color: var(--text-2); font-size: 14.5px; }
+  .ch-learn { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .side { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+  .status { font-size: 11px; padding: 3px 9px; border-radius: 999px; height: fit-content; }
+  .s-ready { background: var(--accent-soft); color: var(--accent-text); }
+  .s-soon { background: var(--surface-3); color: var(--text-3); border: 1px solid var(--border); }
+  .planned .ch-title { color: var(--text-2); }
+  .done .s-ready { background: var(--green-soft); color: var(--green); }
+  .done .s-ready::before { content: '✓ '; }
+  .phase-nav { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 40px; }
+  .pn { padding: 16px 20px; display: flex; flex-direction: column; gap: 4px; color: inherit; text-decoration: none !important; }
+  .pn:hover { border-color: var(--accent); }
+  .pn span { font-size: 12px; color: var(--accent-text); }
+  .pn.right { text-align: right; }
+  @media (max-width: 640px) {
+    .ch { grid-template-columns: 1fr; gap: 8px; }
+    .side { flex-direction: row; align-items: center; justify-content: flex-start; }
+  }
+</style>
