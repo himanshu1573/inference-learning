@@ -1,0 +1,496 @@
+---
+import Base from '../layouts/Base.astro';
+import CircuitBg from '../components/CircuitBg.astro';
+import LevelBadge from '../components/LevelBadge.astro';
+import { phases, totalChapters, pad, levelNames, type Level } from '../data/curriculum';
+import { getReadyIds } from '../lib/book';
+
+const ready = await getReadyIds();
+const readyCount = ready.size;
+
+// Each phase as one layer of the inference stack, top to bottom.
+const stackTags: Record<string, string[]> = {
+  production: ['SLOs', 'Benchmarks', 'Prometheus', 'Cost per token'],
+  kubernetes: ['GPU Operator', 'Gateway API', 'llm-d', 'Semantic Router', 'KServe'],
+  'serving-engines': ['vLLM', 'SGLang', 'TensorRT-LLM', 'Dynamo', 'LMCache'],
+  'inference-fundamentals': ['Tokenizer', 'Attention', 'KV cache', 'FlashAttention', 'Quantization'],
+  'gpu-hardware': ['SMs', 'Tensor Cores', 'HBM', 'NVLink', 'FP8'],
+};
+
+const features = [
+  { title: 'New words first', text: 'Every chapter starts with a short list of new words and their simple meanings. No surprise jargon.' },
+  { title: 'Pictures for every idea', text: 'Diagrams show the real mechanism: where data lives, how it moves, and what waits for what.' },
+  { title: 'Real numbers', text: 'We use real models and real GPUs (Llama, H100, B200), so you can check every number yourself.' },
+  { title: 'Step-by-step math', text: 'Formulas are built one small step at a time. Each step says what it means in plain words.' },
+  { title: 'Try it yourself', text: 'Small calculators let you move sliders and watch speed and memory change in real time.' },
+  { title: 'Basic to advanced', text: 'Each chapter starts simple and goes deeper step by step. Hard parts sit in optional “Deep dive” boxes, and every chapter ends with check-yourself questions.' },
+];
+
+const faqs = [
+  {
+    q: 'Who is this book for?',
+    a: 'Anyone who wants to understand how ChatGPT-style models are served: students, backend engineers, DevOps and platform engineers, and people who want to contribute to projects like vLLM or llm-d.',
+  },
+  {
+    q: 'Do I need to know a lot of math?',
+    a: 'No. If you can multiply and divide, you can follow the book. When we need a formula, we build it slowly and explain every symbol in simple words.',
+  },
+  {
+    q: 'Do I need a GPU to learn from this book?',
+    a: 'No. All the ideas, pictures and calculators work in your browser. A GPU helps later if you want to run the engines yourself, but you can rent one by the hour.',
+  },
+  {
+    q: 'Why does the book start with hardware?',
+    a: 'Because almost every trick in LLM serving (KV cache, batching, FlashAttention, quantization) exists to work around a limit of the hardware. Once you know the limits, the tricks make sense.',
+  },
+  {
+    q: 'What are the three reading themes?',
+    a: 'Light and Dark are the normal site themes. Reading mode uses warm paper colours, a book font and a single calm column, so you can read long chapters without distraction. Use the switch in the top bar.',
+  },
+  {
+    q: 'Is my progress saved?',
+    a: 'Yes, in your own browser only. Press "Mark as read" at the end of a chapter and the roadmap will show your progress. Nothing is sent to a server.',
+  },
+];
+---
+<Base title="The LLM Inference Book" active="home">
+  <!-- Hero -->
+  <section class="hero grid-bg">
+    <CircuitBg />
+    <div class="container hero-inner">
+      <span class="eyebrow">A free book in simple English</span>
+      <h1>From GPU silicon to<br /><span class="accent">serving at scale</span>.</h1>
+      <p class="lead">
+        Learn how large language models really run in production. We start with the chip, climb through the
+        model and the serving engine, and finish with Kubernetes and real costs. Every idea is explained with
+        pictures, real numbers and step-by-step math.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="/gpu-hardware/why-gpus">Start Phase 1 <span aria-hidden="true">→</span></a>
+        <a class="btn btn-ghost" href="#roadmap">See the roadmap</a>
+      </div>
+      <div class="meta-line">
+        <span>5 phases</span>
+        <span>{totalChapters} chapters</span>
+        <span>{readyCount} ready to read</span>
+        <span>Basic → Expert</span>
+        <span>B1 English</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Roadmap -->
+  <section class="section" id="roadmap">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">The route</span>
+        <h2>Five phases, <span class="accent">one stack</span></h2>
+        <p>Each phase is one layer of the inference stack. We start at the bottom, because every layer is built on the one below it.</p>
+      </div>
+
+      <ol class="steps">
+        {phases.map((p) => (
+          <li>
+            <a href={`/${p.slug}`} class="step">
+              <span class="step-n mono">{pad(p.num)}</span>
+              <span class="step-title">{p.title}</span>
+              <span class="step-text">{p.short}</span>
+            </a>
+          </li>
+        ))}
+      </ol>
+
+      <div class="stack card">
+        <div class="stack-head">
+          <span class="mono stack-label">The inference stack</span>
+          <span class="live-pill">read bottom → top</span>
+        </div>
+        {[...phases].reverse().map((p) => (
+          <a href={`/${p.slug}`} class={`layer layer-${p.num}`}>
+            <span class="layer-n mono">{pad(p.num)}</span>
+            <span class="layer-main">
+              <span class="layer-title">{p.title}</span>
+              <span class="layer-text">{p.tagline}</span>
+            </span>
+            <span class="layer-tags">
+              {stackTags[p.slug].map((t) => <span class="tag">{t}</span>)}
+            </span>
+          </a>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- Phases -->
+  <section class="section phases-section" id="phases">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">Every chapter</span>
+        <h2>What you will <span class="accent">learn</span></h2>
+        <p>Every phase starts easy and gets harder. Chapters with a filled dot are ready; the others are planned and show what they will teach.</p>
+        <div class="legend">
+          {([1, 2, 3, 4] as Level[]).map((l) => <span class="legend-item"><LevelBadge level={l} /></span>)}
+        </div>
+      </div>
+      <div class="phase-grid">
+        {phases.map((p) => (
+          <article class="phase-card card bracket">
+            <div class="pc-top">
+              <span class="eyebrow">Phase {pad(p.num)}</span>
+              <span class="mono pc-progress" data-progress-phase={p.slug} data-total={p.chapters.length}>0 / {p.chapters.length} read</span>
+            </div>
+            <h3><a href={`/${p.slug}`}>{p.title}</a></h3>
+            <p class="pc-goal"><strong>You will be able to:</strong> {p.goal}</p>
+            <ol class="pc-list">
+              {p.chapters.map((c, i) => {
+                const id = `${p.slug}/${c.slug}`;
+                const isReady = ready.has(id);
+                return (
+                  <li class={isReady ? 'ready' : 'planned'} data-chapter-id={id}>
+                    <span class="pc-num mono">{pad(i + 1)}</span>
+                    <a href={`/${id}`}>{c.title}</a>
+                    <LevelBadge level={c.level} compact />
+                    <span class="pc-dot" title={isReady ? 'Ready' : 'Coming soon'} />
+                  </li>
+                );
+              })}
+            </ol>
+          </article>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- How chapters work -->
+  <section class="section" id="how">
+    <div class="container">
+      <div class="section-head">
+        <span class="eyebrow">How each chapter works</span>
+        <h2>Built for <span class="accent">understanding</span></h2>
+        <p>Short sentences. Simple words. Real numbers. Every chapter follows the same shape, so you always know where you are.</p>
+      </div>
+      <div class="feature-grid">
+        {features.map((f, i) => (
+          <div class="feature card bracket">
+            <span class="f-icon mono">{pad(i + 1)}</span>
+            <h3>{f.title}</h3>
+            <p>{f.text}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- Before you start -->
+  <section class="section">
+    <div class="container">
+      <div class="panel">
+        <div class="section-head">
+          <span class="eyebrow">Before you start</span>
+          <h2>What you need, <span class="accent">and what you don't</span></h2>
+          <p>This book is made for people who are new to the topic. Here is an honest list.</p>
+        </div>
+        <div class="table-wrap need-table">
+          <table>
+            <thead><tr><th>Topic</th><th>You do not need</th><th>Helpful to have</th></tr></thead>
+            <tbody>
+              <tr><td>Math</td><td class="muted">Calculus or linear algebra courses</td><td class="accent">Multiplying, dividing, powers of 2</td></tr>
+              <tr><td>Programming</td><td class="muted">CUDA or C++</td><td class="accent">Reading simple Python</td></tr>
+              <tr><td>Machine learning</td><td class="muted">How models are trained</td><td class="accent">Knowing a model has "weights"</td></tr>
+              <tr><td>Hardware</td><td class="muted">Your own GPU</td><td class="accent">Curiosity about how computers work</td></tr>
+              <tr><td>Infrastructure</td><td class="muted">Kubernetes experience (we teach it)</td><td class="accent">Using a terminal</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section" id="faq">
+    <div class="container faq-wrap">
+      <div class="section-head">
+        <span class="eyebrow">FAQ</span>
+        <h2>Common questions</h2>
+      </div>
+      <div class="faq">
+        {faqs.map((f, i) => (
+          <details open={i === 0}>
+            <summary>
+              <span class="mono faq-n">{pad(i + 1)}</span>
+              <span class="faq-q">{f.q}</span>
+              <svg class="chev" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6" /></svg>
+            </summary>
+            <p>{f.a}</p>
+          </details>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- Final CTA -->
+  <section class="cta grid-bg">
+    <CircuitBg variant="cta" />
+    <div class="container cta-inner">
+      <span class="eyebrow">Start here</span>
+      <h2>Begin with <span class="accent">the machine</span></h2>
+      <p>Phase 1 explains the GPU in seven short chapters. After it, every other part of the book will make sense.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="/gpu-hardware/why-gpus">Read chapter 1 <span aria-hidden="true">→</span></a>
+        <a class="btn btn-ghost" href="/gpu-hardware">Phase 1 overview</a>
+      </div>
+    </div>
+  </section>
+</Base>
+
+<script>
+  // Show reading progress saved in this browser.
+  let read: string[] = [];
+  try {
+    read = JSON.parse(localStorage.getItem('llmbook-read') || '[]');
+  } catch {}
+  const done = new Set(read);
+  document.querySelectorAll<HTMLElement>('[data-chapter-id]').forEach((el) => {
+    if (done.has(el.dataset.chapterId!)) el.classList.add('done');
+  });
+  document.querySelectorAll<HTMLElement>('[data-progress-phase]').forEach((el) => {
+    const phase = el.dataset.progressPhase!;
+    const n = read.filter((id) => id.startsWith(phase + '/')).length;
+    el.textContent = `${n} / ${el.dataset.total} read`;
+  });
+</script>
+
+<style>
+  .hero {
+    position: relative;
+    overflow: hidden;
+    padding: 96px 0 88px;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero-inner {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 22px;
+  }
+  .hero h1 {
+    font-size: clamp(38px, 6.6vw, 68px);
+    font-weight: 800;
+    letter-spacing: -0.035em;
+    line-height: 1.04;
+  }
+  .lead {
+    max-width: 620px;
+    color: var(--text-2);
+    font-size: 17px;
+    line-height: 1.7;
+  }
+  .cta-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    margin-top: 6px;
+  }
+
+  /* Numbered steps joined by a line */
+  .steps {
+    list-style: none;
+    margin: 0 0 40px;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    position: relative;
+  }
+  .steps::before {
+    content: '';
+    position: absolute;
+    top: 22px;
+    left: 10%;
+    right: 10%;
+    height: 1px;
+    background: var(--border-strong);
+  }
+  .step {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 6px;
+    padding: 0 8px;
+    color: inherit;
+    text-decoration: none !important;
+  }
+  .step-n {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: 1.5px solid var(--accent);
+    background: var(--bg);
+    color: var(--accent-text);
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    transition: background 0.15s, color 0.15s;
+  }
+  .step:hover .step-n { background: var(--accent); color: var(--on-accent); }
+  .step-title { font-weight: 700; font-size: 15px; }
+  .step-text { font-size: 13px; color: var(--text-2); }
+
+  /* Stack diagram */
+  .stack { padding: 8px; }
+  .stack-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px 12px;
+  }
+  .stack-label { font-size: 11.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); }
+  .layer {
+    display: grid;
+    grid-template-columns: 52px 1fr auto;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 18px;
+    margin-top: 6px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface-3);
+    color: inherit;
+    text-decoration: none !important;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .layer:hover { border-color: var(--accent); transform: translateX(3px); }
+  .layer-1 { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, var(--border)); }
+  .layer-n {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent-text);
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 6px 0;
+    text-align: center;
+  }
+  .layer-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .layer-title { font-weight: 700; }
+  .layer-text { font-size: 13.5px; color: var(--text-2); }
+  .layer-tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 420px; }
+
+  /* Phase cards */
+  .phases-section { background: var(--bg-elev); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .phase-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 20px;
+  }
+  .phase-card { padding: 22px 22px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .pc-top { display: flex; justify-content: space-between; align-items: center; }
+  .pc-progress { font-size: 11.5px; color: var(--text-3); }
+  .phase-card h3 { font-size: 21px; font-weight: 750; }
+  .phase-card h3 a { color: var(--text); }
+  .pc-goal { font-size: 13.5px; color: var(--text-2); line-height: 1.55; }
+  .pc-goal strong { color: var(--text); font-weight: 600; }
+  .pc-list { list-style: none; padding: 0; margin: 6px 0 0; }
+  .pc-list li {
+    display: grid;
+    grid-template-columns: 26px 1fr auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-top: 1px dashed var(--border);
+    font-size: 14px;
+  }
+  .pc-num { font-size: 11.5px; color: var(--text-3); }
+  .pc-list a { color: var(--text); }
+  .pc-list li.planned a { color: var(--text-2); }
+  .pc-dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--border-strong); }
+  .pc-list li.ready .pc-dot { background: var(--accent); border-color: var(--accent); }
+  .pc-list li.done .pc-dot { background: var(--green); border-color: var(--green); }
+  .pc-list li.done a { text-decoration: line-through; text-decoration-color: var(--text-3); }
+
+  .legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
+  .legend-item { padding: 5px 11px; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; }
+
+  /* Features */
+  .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .feature { padding: 22px; }
+  .f-icon {
+    display: inline-grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+  .feature h3 { font-size: 16px; font-weight: 700; margin: 14px 0 6px; }
+  .feature p { font-size: 14px; color: var(--text-2); line-height: 1.6; }
+
+  /* Panel */
+  .panel {
+    background: var(--surface-2);
+    border-radius: 22px;
+    padding: 64px 32px;
+  }
+  .need-table { max-width: 820px; margin: 0 auto; }
+
+  /* FAQ */
+  .faq-wrap { max-width: 760px; }
+  .faq { border-top: 1px solid var(--border); }
+  .faq details { border-bottom: 1px solid var(--border); }
+  .faq summary {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 4px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq-n { font-size: 12px; color: var(--accent-text); font-weight: 600; }
+  .faq-q { flex: 1; font-weight: 600; font-size: 15px; }
+  .chev { color: var(--text-3); transition: transform 0.2s; flex: none; }
+  .faq details[open] .chev { transform: rotate(180deg); }
+  .faq details p { padding: 0 40px 18px 44px; color: var(--text-2); font-size: 14.5px; line-height: 1.7; }
+
+  /* CTA */
+  .cta { position: relative; overflow: hidden; padding: 96px 0; border-top: 1px solid var(--border); }
+  .cta-inner {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 14px;
+  }
+  .cta h2 { font-size: clamp(28px, 4vw, 40px); font-weight: 800; letter-spacing: -0.03em; }
+  .cta p { color: var(--text-2); max-width: 520px; }
+
+  @media (max-width: 960px) {
+    .feature-grid { grid-template-columns: 1fr 1fr; }
+    .layer { grid-template-columns: 44px 1fr; }
+    .layer-tags { grid-column: 2; justify-content: flex-start; }
+  }
+  @media (max-width: 720px) {
+    .hero { padding: 64px 0 56px; }
+    .steps { grid-template-columns: 1fr; gap: 14px; }
+    .steps::before { display: none; }
+    .step { flex-direction: row; text-align: left; gap: 12px; }
+    .step-n { margin: 0; flex: none; }
+    .step-text::before { content: '· '; }
+    .feature-grid { grid-template-columns: 1fr; }
+    .phase-grid { grid-template-columns: 1fr; }
+    .panel { padding: 40px 16px; border-radius: 16px; }
+    .faq details p { padding: 0 8px 18px 44px; }
+  }
+</style>
