@@ -1,0 +1,36 @@
+---
+// Range (biggest number, log scale) vs precision (steps between 1 and 2) for each format.
+const rows = [
+  { n: 'FP32', max: '3.4 × 10³⁸', log: 38.53, m: 23, steps: '8,388,608' },
+  { n: 'BF16', max: '3.4 × 10³⁸', log: 38.53, m: 7, steps: '128' },
+  { n: 'FP16', max: '65,504', log: 4.816, m: 10, steps: '1,024' },
+  { n: 'FP8 E5M2', max: '57,344', log: 4.758, m: 2, steps: '4' },
+  { n: 'FP8 E4M3', max: '448', log: 2.651, m: 3, steps: '8' },
+  { n: 'FP4 E2M1', max: '6', log: 0.778, m: 1, steps: '2' },
+];
+const rx = 120;
+const rw = 250;
+const px = 500;
+const pw = 120;
+---
+<svg viewBox="0 0 720 320" role="img" aria-label="Range and precision. FP32 and BF16 reach 3.4 times 10 to the 38. FP16 reaches 65,504, FP8 E5M2 57,344, FP8 E4M3 448, FP4 only 6. Steps between 1 and 2: FP32 8,388,608, BF16 128, FP16 1,024, E5M2 4, E4M3 8, FP4 2.">
+  <text x={rx} y="28" class="t" font-size="12" font-weight="700">Biggest number <tspan class="t3" font-weight="400">(range, log scale)</tspan></text>
+  <text x={px} y="28" class="t" font-size="12" font-weight="700">Steps between 1 and 2 <tspan class="t3" font-weight="400">(precision)</tspan></text>
+  {rows.map((r, i) => {
+    const y = 50 + i * 40;
+    const w = Math.max(4, (r.log / 39) * rw);
+    const p = Math.max(4, (r.m / 23) * pw);
+    return (
+      <g>
+        <text x="20" y={y + 13} class="t mono" font-size="12" font-weight="600">{r.n}</text>
+        <rect x={rx} y={y} width={rw} height="18" rx="4" class="fill-soft" />
+        <rect x={rx} y={y} width={w} height="18" rx="4" class="fill-a" />
+        <text x={rx + w + 8} y={y + 13} class="ta mono" font-size="11.5">{r.max}</text>
+        <rect x={px} y={y} width={pw} height="18" rx="4" class="fill-soft" />
+        <rect x={px} y={y} width={p} height="18" rx="4" class="green" />
+        <text x="712" y={y + 13} class="tg mono" font-size="11.5" text-anchor="end">{r.steps}</text>
+      </g>
+    );
+  })}
+  <text x="20" y="300" class="t2" font-size="12">More <tspan class="ta" font-weight="700">exponent</tspan> bits → bigger range. More <tspan class="tg" font-weight="700">mantissa</tspan> bits → finer steps. The bit budget is fixed, so every format is a trade.</text>
+</svg>

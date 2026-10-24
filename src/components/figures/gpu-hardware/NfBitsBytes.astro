@@ -1,0 +1,24 @@
+---
+// 8 bits make 1 byte. Example: 01001101 = 64 + 8 + 4 + 1 = 77.
+const bits = [0, 1, 0, 0, 1, 1, 0, 1];
+const places = [128, 64, 32, 16, 8, 4, 2, 1];
+const x0 = 110;
+const w = 62;
+const step = 70;
+---
+<svg viewBox="0 0 720 240" role="img" aria-label="Eight bits 0 1 0 0 1 1 0 1 form one byte. Each position has a place value: 128, 64, 32, 16, 8, 4, 2, 1. The bits that are 1 add up to 64 + 8 + 4 + 1 = 77.">
+  <text x="20" y="48" class="t3" font-size="11">place value</text>
+  <text x="20" y="98" class="t3" font-size="11">bit</text>
+  <text x="20" y="150" class="t3" font-size="11">adds</text>
+  {bits.map((b, i) => (
+    <g>
+      <text x={x0 + i * step + w / 2} y="48" class="t2 mono" font-size="12" text-anchor="middle">{places[i]}</text>
+      <rect x={x0 + i * step} y="62" width={w} height="56" rx="8" class={b ? 'box-a' : 'box'} />
+      <text x={x0 + i * step + w / 2} y="99" class={b ? 'ta mono' : 't3 mono'} font-size="24" font-weight="700" text-anchor="middle">{b}</text>
+      <text x={x0 + i * step + w / 2} y="150" class={b ? 'ta mono' : 't3 mono'} font-size="12" text-anchor="middle">{b ? `+${places[i]}` : '·'}</text>
+    </g>
+  ))}
+  <path d={`M${x0} 166 V174 H${x0 + 7 * step + w} V166`} class="line-t" stroke-width="1.3" />
+  <text x={x0 + (7 * step + w) / 2} y="194" class="t" font-size="13" font-weight="700" text-anchor="middle">8 bits = 1 byte · 2⁸ = 256 different patterns</text>
+  <text x={x0 + (7 * step + w) / 2} y="222" class="ta mono" font-size="14" font-weight="700" text-anchor="middle">01001101 = 64 + 8 + 4 + 1 = 77</text>
+</svg>

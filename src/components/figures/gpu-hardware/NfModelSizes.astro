@@ -1,0 +1,55 @@
+---
+// Memory for Llama 3.1 weights in BF16, FP8 and FP4 (log scale), with GPU limits.
+const models = [
+  { name: 'Llama 3.1 8B', p: 8.03 },
+  { name: 'Llama 3.1 70B', p: 70.6 },
+  { name: 'Llama 3.1 405B', p: 405 },
+];
+const fmts = [
+  { n: 'BF16', b: 2, cls: 'fill-a' },
+  { n: 'FP8', b: 1, cls: 'teal' },
+  { n: 'FP4', b: 0.5, cls: 'violet' },
+];
+const x0 = 150;
+const dec = 180;
+const xOf = (gb: number) => x0 + dec * Math.log10(gb);
+const fmt = (v: number) => (v >= 100 ? v.toFixed(0) : v.toFixed(1));
+const y0 = 52;
+const barH = 18;
+---
+<svg viewBox="0 0 720 390" role="img" aria-label="Weights memory on a log scale. 8B: 16 GB BF16, 8 GB FP8, 4 GB FP4. 70B: 141, 71, 35 GB. 405B: 810, 405, 203 GB. Lines at 80 GB for one H100 and 640 GB for eight H100s.">
+  <!-- axis -->
+  {[1, 10, 100, 1000].map((v) => (
+    <g>
+      <path d={`M${xOf(v)} 40 V330`} class="line" stroke-dasharray="2 4" />
+      <text x={xOf(v)} y="350" class="t3 mono" font-size="11" text-anchor="middle">{v >= 1000 ? '1,000' : v} GB</text>
+    </g>
+  ))}
+  <!-- GPU limits -->
+  <path d={`M${xOf(80)} 30 V330`} class="sr" stroke-width="1.6" />
+  <text x={xOf(80) + 4} y="26" class="tr" font-size="11" font-weight="700" text-anchor="middle">1× H100 (80 GB)</text>
+  <path d={`M${xOf(640)} 30 V330`} class="sam" stroke-width="1.6" />
+  <text x={xOf(640) - 10} y="26" class="tam" font-size="11" font-weight="700" text-anchor="middle">8× H100 (640 GB)</text>
+
+  {models.map((m, mi) => (
+    <g>
+      <text x="20" y={y0 + mi * 92 + 34} class="t" font-size="12.5" font-weight="700">{m.name}</text>
+      {fmts.map((f, fi) => {
+        const gb = m.p * f.b;
+        const y = y0 + mi * 92 + fi * (barH + 6);
+        return (
+          <g>
+            <text x={x0 - 8} y={y + 13} class="t3 mono" font-size="10.5" text-anchor="end">{f.n}</text>
+            <rect x={x0} y={y} width={xOf(gb) - x0} height={barH} rx="4" class={f.cls} stroke-width="1" />
+            {xOf(gb) > 640 ? (
+              <text x={xOf(gb) - 6} y={y + 13} class="mono" font-size="11" font-weight="600" text-anchor="end" style="fill: var(--on-accent)">{fmt(gb)} GB</text>
+            ) : (
+              <text x={xOf(gb) + 6} y={y + 13} class="t mono" font-size="11" font-weight="600" style="paint-order: stroke; stroke: var(--surface); stroke-width: 4px">{fmt(gb)} GB</text>
+            )}
+          </g>
+        );
+      })}
+    </g>
+  ))}
+  <text x="20" y="380" class="t3" font-size="11">Weights only. The KV cache and other memory come on top. FP4 scale factors add about 6–12% more.</text>
+</svg>

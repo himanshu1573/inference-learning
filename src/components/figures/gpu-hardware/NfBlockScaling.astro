@@ -1,0 +1,44 @@
+---
+// Three ways to share scale factors: per tensor, per channel (row), per block.
+const rows = 8;
+const cols = 16;
+const c = 12;
+const top = 62;
+const panels = [
+  { x: 24, title: 'Per-tensor', a: '1 scale for the whole matrix', b: 'simple, but one big value hurts all' },
+  { x: 262, title: 'Per-channel', a: '1 scale for each row', b: 'better: each row gets its own size' },
+  { x: 500, title: 'Per-block', a: '1 scale for each small block', b: 'best for FP4 (16 or 32 values)' },
+];
+function cellClass(p: number, r: number, k: number) {
+  if (p === 0) return 'box-a';
+  if (p === 1) return r % 2 ? 'green' : 'box-a';
+  return (r + Math.floor(k / 4)) % 2 ? 'amber' : 'box-a';
+}
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="Three matrices. Per-tensor: one colour and one scale for everything. Per-channel: each row has its own colour and scale. Per-block: each small block of a row has its own scale.">
+  {panels.map((p, pi) => (
+    <g>
+      <text x={p.x} y="34" class="t" font-size="13" font-weight="700">{p.title}</text>
+      {Array.from({ length: rows }).map((_, r) =>
+        Array.from({ length: cols }).map((_, k) => (
+          <rect x={p.x + k * c} y={top + r * c} width={c - 1.5} height={c - 1.5} rx="2" class={cellClass(pi, r, k)} stroke-width="0.6" />
+        )),
+      )}
+      {pi === 0 && (
+        <g>
+          <rect x={p.x + cols * c + 6} y={top + 40} width="22" height="16" rx="4" class="red" />
+          <text x={p.x + cols * c + 17} y={top + 52} class="tr mono" font-size="10" text-anchor="middle">s</text>
+        </g>
+      )}
+      {pi === 1 &&
+        Array.from({ length: rows }).map((_, r) => (
+          <g>
+            <rect x={p.x + cols * c + 6} y={top + r * c} width="14" height={c - 1.5} rx="2" class="red" stroke-width="0.6" />
+          </g>
+        ))}
+      <text x={p.x} y="190" class="t2" font-size="11.5">{p.a}</text>
+      <text x={p.x} y="208" class="t3" font-size="11">{p.b}</text>
+    </g>
+  ))}
+  <text x="20" y="240" class="t3" font-size="11">Red boxes are scale factors. Blocks are drawn with 4 values here; real formats use 16 (NVFP4) or 32 (MXFP4).</text>
+</svg>
