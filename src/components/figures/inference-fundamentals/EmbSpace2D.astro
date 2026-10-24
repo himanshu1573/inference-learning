@@ -1,0 +1,31 @@
+---
+// A toy 2D picture of an embedding space: similar words sit close together.
+const pts = [
+  { w: 'cat', x: 120, y: 90, g: 'a' }, { w: 'dog', x: 160, y: 72, g: 'a' }, { w: 'horse', x: 150, y: 125, g: 'a' },
+  { w: 'car', x: 520, y: 80, g: 'b' }, { w: 'bus', x: 570, y: 110, g: 'b' }, { w: 'truck', x: 600, y: 70, g: 'b' },
+  { w: 'France', x: 250, y: 230, g: 'c' }, { w: 'Paris', x: 330, y: 190, g: 'c' },
+  { w: 'Italy', x: 430, y: 236, g: 'c' }, { w: 'Rome', x: 510, y: 196, g: 'c' },
+];
+const cls: Record<string, string> = { a: 'green', b: 'amber', c: 'box-a' };
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="A toy two-dimensional map of word vectors: animals cluster together, vehicles cluster together, and the arrow from France to Paris is like the arrow from Italy to Rome">
+  <defs>
+    <marker id="es-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <rect x="16" y="16" width="688" height="268" rx="10" class="box" />
+  <path d="M40 270 H690 M40 270 V30" class="line" />
+  <ellipse cx="143" cy="98" rx="70" ry="50" class="green" opacity="0.5" />
+  <ellipse cx="562" cy="88" rx="76" ry="44" class="amber" opacity="0.5" />
+  <text x="143" y="40" class="tg" font-size="11" font-weight="600" text-anchor="middle">animals</text>
+  <text x="562" y="36" class="tam" font-size="11" font-weight="600" text-anchor="middle">vehicles</text>
+  <path d="M256 226 L322 194" class="line-a" stroke-width="1.6" marker-end="url(#es-arrow)" />
+  <path d="M436 232 L502 200" class="line-a" stroke-width="1.6" marker-end="url(#es-arrow)" />
+  <text x="380" y="168" class="ta" font-size="11" font-weight="600" text-anchor="middle">same direction: "capital of"</text>
+  {pts.map((p) => (
+    <g>
+      <circle cx={p.x} cy={p.y} r="5" class={cls[p.g]} stroke-width="1.5" />
+      <text x={p.x + 9} y={p.y + 4} class="t" font-size="12" font-weight="600">{p.w}</text>
+    </g>
+  ))}
+  <text x="690" y="262" class="t3" font-size="10" text-anchor="end">Toy picture in 2 dimensions. Real vectors have 4,096.</text>
+</svg>

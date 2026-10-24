@@ -1,0 +1,43 @@
+---
+// LM head: the final 4,096 numbers become one score for each of the 128,256 tokens.
+const logits = [
+  { t: '␣Paris', v: 21.4 },
+  { t: '␣a', v: 17.9 },
+  { t: '␣the', v: 17.5 },
+  { t: '␣located', v: 16.8 },
+  { t: '…', v: 0 },
+  { t: '␣banana', v: -3.2 },
+];
+---
+<svg viewBox="0 0 720 260" role="img" aria-label="The LM head multiplies the final vector of 4,096 numbers by a 4,096 by 128,256 matrix to get one score for every token">
+  <defs>
+    <marker id="lh-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <text x="16" y="22" class="t" font-size="12" font-weight="700">Last hidden vector</text>
+  <rect x="16" y="36" width="34" height="190" rx="6" class="box-a" />
+  {Array.from({ length: 9 }, (_, i) => <path d={`M20 ${56 + i * 19} H46`} class="line-a" opacity="0.4" />)}
+  <text x="60" y="134" class="ta mono" font-size="10.5" font-weight="700">4,096</text>
+
+  <path d="M104 131 H136" class="line-a" stroke-width="1.5" marker-end="url(#lh-arrow)" />
+  <rect x="140" y="110" width="80" height="42" rx="7" class="box2" />
+  <text x="180" y="129" class="t" font-size="11" font-weight="700" text-anchor="middle">RMSNorm</text>
+  <text x="180" y="144" class="t3" font-size="9.5" text-anchor="middle">final norm</text>
+  <path d="M222 131 H254" class="line-a" stroke-width="1.5" marker-end="url(#lh-arrow)" />
+
+  <text x="258" y="22" class="t" font-size="12" font-weight="700">LM head matrix</text>
+  <rect x="258" y="36" width="230" height="190" rx="8" class="box" />
+  {Array.from({ length: 10 }, (_, i) => <path d={`M${270 + i * 22} 44 V218`} class="line" opacity="0.6" />)}
+  <text x="373" y="124" class="t mono" font-size="12" font-weight="700" text-anchor="middle">4,096 × 128,256</text>
+  <text x="373" y="142" class="t2" font-size="10.5" text-anchor="middle">1.05 GB in BF16</text>
+  <text x="373" y="158" class="t2" font-size="10.5" text-anchor="middle">≈ 1.05 GFLOPs per token</text>
+
+  <path d="M492 131 H524" class="line-a" stroke-width="1.5" marker-end="url(#lh-arrow)" />
+  <text x="530" y="22" class="t" font-size="12" font-weight="700">Logits (128,256 scores)</text>
+  {logits.map((l, i) => (
+    <g>
+      <text x="530" y={56 + i * 30} class={i === 0 ? 'ta mono' : 't2 mono'} font-size="11" font-weight={i === 0 ? '700' : '400'}>{l.t}</text>
+      {l.t !== '…' && <text x="704" y={56 + i * 30} class={i === 0 ? 'ta mono' : 't3 mono'} font-size="11" text-anchor="end" font-weight={i === 0 ? '700' : '400'}>{l.v.toFixed(1)}</text>}
+    </g>
+  ))}
+  <text x="16" y="252" class="t3" font-size="10">Scores are examples. Softmax turns them into probabilities (chapter 2.5).</text>
+</svg>

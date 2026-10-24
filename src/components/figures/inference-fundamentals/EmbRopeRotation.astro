@@ -1,0 +1,51 @@
+---
+// RoPE: a pair of numbers is rotated by an angle that grows with the position.
+const step = 30; // degrees per position
+const cx = 150, cy = 150, r = 100;
+const pos = [0, 1, 2, 3, 4];
+const pt = (deg: number, rr = r) => [cx + rr * Math.cos((deg * Math.PI) / 180), cy - rr * Math.sin((deg * Math.PI) / 180)];
+// right panel: same distance at two places
+const cx2 = 520;
+const pt2 = (deg: number, rr = 90) => [cx2 + rr * Math.cos((deg * Math.PI) / 180), cy - rr * Math.sin((deg * Math.PI) / 180)];
+---
+<svg viewBox="0 0 720 310" role="img" aria-label="RoPE rotates a pair of numbers by 30 degrees for every position. Two tokens one position apart always have a 30 degree angle between them, wherever they are.">
+  <defs>
+    <marker id="rr-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+    <marker id="rr-arrow-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="tg" /></marker>
+    <marker id="rr-arrow-v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="tv" /></marker>
+  </defs>
+  <text x="20" y="22" class="t" font-size="12.5" font-weight="700">One pair, rotated by 30° per position</text>
+  <circle cx={cx} cy={cy} r={r} class="line" stroke-dasharray="3 4" />
+  <path d={`M${cx - r - 10} ${cy} H${cx + r + 10} M${cx} ${cy - r - 10} V${cy + r + 10}`} class="line" />
+  {pos.map((p) => {
+    const [x, y] = pt(p * step);
+    const [lx, ly] = pt(p * step, r + 18);
+    return (
+      <g>
+        <path d={`M${cx} ${cy} L${x} ${y}`} class="line-a" stroke-width={p === 0 ? 2.2 : 1.4} opacity={0.45 + p * 0.13} marker-end="url(#rr-arrow)" />
+        <text x={lx} y={ly + 4} class="ta mono" font-size="10.5" font-weight="700" text-anchor="middle">pos {p}</text>
+      </g>
+    );
+  })}
+  <text x="20" y="290" class="t2" font-size="11">pos 0: no turn · pos 1: 30° · pos 2: 60° · pos 3: 90° …</text>
+
+  <text x="380" y="22" class="t" font-size="12.5" font-weight="700">Only the distance matters</text>
+  <circle cx={cx2} cy={cy} r="90" class="line" stroke-dasharray="3 4" />
+  {[
+    { deg: 60, cls: 'line-a', m: 'rr-arrow', l: 'q at pos 2', tc: 'ta' },
+    { deg: 90, cls: 'line-a', m: 'rr-arrow', l: 'k at pos 3', tc: 'ta' },
+    { deg: 210, cls: 'sg', m: 'rr-arrow-g', l: 'q at pos 7', tc: 'tg' },
+    { deg: 240, cls: 'sg', m: 'rr-arrow-g', l: 'k at pos 8', tc: 'tg' },
+  ].map((v) => {
+    const [x, y] = pt2(v.deg);
+    const [lx, ly] = pt2(v.deg, 112);
+    return (
+      <g>
+        <path d={`M${cx2} ${cy} L${x} ${y}`} class={v.cls} stroke-width="1.8" marker-end={`url(#${v.m})`} />
+        <text x={lx} y={ly + 4} class={`${v.tc} mono`} font-size="10.5" font-weight="700" text-anchor="middle">{v.l}</text>
+      </g>
+    );
+  })}
+  <text x="380" y="276" class="t2" font-size="11">Both pairs are 1 position apart, so both have a</text>
+  <text x="380" y="292" class="t2" font-size="11">30° angle between them, and the same dot product.</text>
+</svg>
