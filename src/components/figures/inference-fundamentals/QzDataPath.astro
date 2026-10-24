@@ -1,0 +1,42 @@
+---
+// W4A16 (weight-only) vs W8A8 FP8: what is stored, what is moved, where the math happens.
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Weight-only W4A16: 4-bit weights are read from HBM, expanded to BF16 inside the SM and multiplied by BF16 Tensor Cores. W8A8 FP8: FP8 weights and FP8 activations go straight into FP8 Tensor Cores, which are twice as fast.">
+  <defs>
+    <marker id="qzd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <!-- W4A16 -->
+  <text x="20" y="26" class="t" font-size="13" font-weight="700">Weight-only: W4A16</text>
+  <rect x="20" y="44" width="120" height="56" rx="9" class="box2" />
+  <text x="80" y="66" class="t3 mono" font-size="10.5" text-anchor="middle">HBM</text>
+  <text x="80" y="86" class="ta mono" font-size="12" font-weight="700" text-anchor="middle">INT4 weights</text>
+  <path d="M144 72 H176" class="line-a" stroke-width="1.6" marker-end="url(#qzd-arrow)" />
+  <rect x="180" y="44" width="150" height="56" rx="9" class="amber" />
+  <text x="255" y="66" class="tam mono" font-size="10.5" text-anchor="middle">IN THE SM</text>
+  <text x="255" y="86" class="t" font-size="12" font-weight="600" text-anchor="middle">expand to BF16</text>
+  <path d="M334 72 H366" class="line-a" stroke-width="1.6" marker-end="url(#qzd-arrow)" />
+  <rect x="370" y="44" width="170" height="56" rx="9" class="box" />
+  <text x="455" y="66" class="t3 mono" font-size="10.5" text-anchor="middle">TENSOR CORE</text>
+  <text x="455" y="86" class="t" font-size="12" font-weight="600" text-anchor="middle">BF16 × BF16 math</text>
+  <text x="560" y="64" class="tg" font-size="11.5" font-weight="600">4× fewer weight bytes</text>
+  <text x="560" y="82" class="t2" font-size="11.5">math speed unchanged</text>
+  <text x="560" y="100" class="t3" font-size="11">best at small batches</text>
+
+  <!-- W8A8 -->
+  <text x="20" y="156" class="t" font-size="13" font-weight="700">Weights and activations: W8A8 (FP8)</text>
+  <rect x="20" y="174" width="120" height="56" rx="9" class="box2" />
+  <text x="80" y="196" class="t3 mono" font-size="10.5" text-anchor="middle">HBM</text>
+  <text x="80" y="216" class="ta mono" font-size="12" font-weight="700" text-anchor="middle">FP8 weights</text>
+  <rect x="180" y="174" width="150" height="56" rx="9" class="box" />
+  <text x="255" y="196" class="t3 mono" font-size="10.5" text-anchor="middle">ACTIVATIONS</text>
+  <text x="255" y="216" class="t" font-size="12" font-weight="600" text-anchor="middle">quantized to FP8</text>
+  <path d="M140 222 Q 255 286 368 222" class="line-a" stroke-width="1.6" marker-end="url(#qzd-arrow)" />
+  <path d="M334 202 H366" class="line-a" stroke-width="1.6" marker-end="url(#qzd-arrow)" />
+  <rect x="370" y="174" width="170" height="56" rx="9" class="box-a" />
+  <text x="455" y="196" class="ta mono" font-size="10.5" text-anchor="middle">TENSOR CORE</text>
+  <text x="455" y="216" class="t" font-size="12" font-weight="700" text-anchor="middle">FP8 × FP8 math</text>
+  <text x="560" y="194" class="tg" font-size="11.5" font-weight="600">2× fewer weight bytes</text>
+  <text x="560" y="212" class="tg" font-size="11.5" font-weight="600">2× faster math (H100)</text>
+  <text x="560" y="230" class="t3" font-size="11">good at all batch sizes</text>
+  <text x="20" y="282" class="t3" font-size="11">Scales are applied inside the kernel. The output of each matmul is usually kept in BF16.</text>
+</svg>

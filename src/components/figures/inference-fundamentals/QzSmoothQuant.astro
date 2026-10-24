@@ -1,0 +1,36 @@
+---
+// SmoothQuant: divide each activation channel by s, multiply the matching weight row by s.
+const actBefore = [1.2, 0.9, 60, 1.5, 0.8, 1.1];
+const wBefore = [0.4, 0.5, 0.5, 0.3, 0.45, 0.35];
+const s = 10.95;
+const actAfter = actBefore.map((a, i) => (i === 2 ? a / s : a));
+const wAfter = wBefore.map((w, i) => (i === 2 ? w * s : w));
+const H = 90;
+function bars(x0: number, vals: number[], max: number, cls: string, hot: string) {
+  return vals.map((v, i) => ({ x: x0 + i * 30, h: Math.max(2, (v / max) * H), cls: i === 2 ? hot : cls, v }));
+}
+const panels = [
+  { x: 20, title: 'Activations: before', data: bars(20, actBefore, 60, 'box-a', 'red'), lab: 'channel 3 = 60' },
+  { x: 200, title: 'Weights: before', data: bars(200, wBefore, 6, 'box', 'box'), lab: 'all ≤ 0.5' },
+  { x: 380, title: 'Activations: after', data: bars(380, actAfter, 60, 'box-a', 'green'), lab: '60 ÷ 10.95 ≈ 5.5' },
+  { x: 560, title: 'Weights: after', data: bars(560, wAfter, 6, 'box', 'green'), lab: '0.5 × 10.95 ≈ 5.5' },
+];
+---
+<svg viewBox="0 0 740 250" role="img" aria-label="SmoothQuant: an activation channel with an outlier of 60 is divided by 10.95, and the matching weight row is multiplied by 10.95. Both now have a maximum of about 5.5, which is easy to quantize.">
+  {panels.map((p) => (
+    <g>
+      <text x={p.x} y="24" class="t" font-size="12" font-weight="700">{p.title}</text>
+      <path d={`M${p.x - 4} ${40 + H} H${p.x + 176}`} class="line" />
+      {p.data.map((b) => (
+        <rect x={b.x} y={40 + H - b.h} width="22" height={b.h} rx="3" class={b.cls} />
+      ))}
+      <text x={p.x} y={40 + H + 20} class="t2 mono" font-size="10.5">{p.lab}</text>
+    </g>
+  ))}
+  <path d="M190 30 V168" class="line" stroke-dasharray="3 4" />
+  <path d="M370 30 V168" class="line-a" stroke-width="1.4" />
+  <path d="M550 30 V168" class="line" stroke-dasharray="3 4" />
+  <text x="20" y="186" class="t3" font-size="11">Activation bars use a 0–60 scale; weight bars use a 0–6 scale.</text>
+  <text x="20" y="214" class="t" font-size="12" font-weight="600">X · W does not change: (X ÷ s) · (s × W) = X · W.</text>
+  <text x="20" y="234" class="t2" font-size="11.5">The hard outlier moves from the activations (quantized at run time) into the weights (quantized once, carefully).</text>
+</svg>

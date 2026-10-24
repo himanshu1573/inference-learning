@@ -1,0 +1,37 @@
+---
+// GPTQ: quantize one column, push its error onto the columns not yet quantized.
+// AWQ: find the few important input channels and scale them up before rounding.
+---
+<svg viewBox="0 0 720 280" role="img" aria-label="Left: GPTQ quantizes the weight matrix one column at a time and adjusts the remaining columns to cancel the error. Right: AWQ finds input channels with large activations and scales them up so rounding hurts them less.">
+  <defs>
+    <marker id="qzg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="tam" /></marker>
+  </defs>
+  <!-- GPTQ -->
+  <text x="20" y="16" class="t" font-size="13" font-weight="700">GPTQ: fix errors as you go</text>
+  {Array.from({ length: 6 }, (_, c) =>
+    Array.from({ length: 5 }, (_, r) => (
+      <rect x={30 + c * 46} y={44 + r * 30} width="40" height="24" rx="4" class={c < 2 ? 'box-a' : c === 2 ? 'amber' : 'box'} />
+    )),
+  )}
+  <text x="73" y="208" class="ta" font-size="11" text-anchor="middle">done (INT4)</text>
+  <text x="145" y="208" class="tam" font-size="11" text-anchor="middle">rounding now</text>
+  <text x="235" y="208" class="t2" font-size="11" text-anchor="middle">not yet: adjusted</text>
+  <path d="M142 40 C 180 24, 230 24, 262 40" class="sam" stroke-width="1.6" marker-end="url(#qzg-arrow)" />
+  <text x="20" y="236" class="t2" font-size="11.5">Rounding column 3 adds an error. GPTQ changes columns 4–6</text>
+  <text x="20" y="252" class="t2" font-size="11.5">a little so the layer's <tspan class="t" font-weight="600">output</tspan> stays almost the same.</text>
+
+  <!-- AWQ -->
+  <text x="400" y="16" class="t" font-size="13" font-weight="700">AWQ: protect the important channels</text>
+  <text x="400" y="46" class="t3" font-size="11">average activation size per input channel</text>
+  {[0.8, 1.1, 0.7, 6.5, 0.9, 1.0, 0.6, 1.2].map((a, i) => (
+    <g>
+      <rect x={404 + i * 36} y={150 - a * 14} width="26" height={a * 14} rx="3" class={i === 3 ? 'red' : 'box-a'} />
+    </g>
+  ))}
+  <path d="M398 150 H690" class="line" />
+  <text x="521" y="172" class="tr" font-size="11" font-weight="600" text-anchor="middle">salient channel</text>
+  <rect x="400" y="186" width="300" height="50" rx="9" class="green" />
+  <text x="412" y="207" class="tg" font-size="11.5" font-weight="600">Multiply its weights by s (e.g. 2) before rounding,</text>
+  <text x="412" y="225" class="tg" font-size="11.5" font-weight="600">divide its activations by s. Its relative error shrinks.</text>
+  <text x="400" y="256" class="t3" font-size="11">All weights stay INT4, so the format is still simple for the GPU.</text>
+</svg>

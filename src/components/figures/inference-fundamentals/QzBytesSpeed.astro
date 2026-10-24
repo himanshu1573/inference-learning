@@ -1,0 +1,27 @@
+---
+// Smaller weights = less memory and faster memory-bound decode (Llama 3.1 8B, H100).
+const rows = [
+  { f: 'BF16', gb: 16.06, cls: 'box' },
+  { f: 'FP8', gb: 8.03, cls: 'box-a' },
+  { f: 'INT4', gb: 4.3, cls: 'box-a' },
+];
+const scale = 22; // px per GB
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="Llama 3.1 8B weights: BF16 16 GB and 4.8 ms per decode step, FP8 8 GB and 2.4 ms, INT4 about 4.3 GB and 1.3 ms on an H100">
+  <text x="20" y="26" class="t" font-size="13" font-weight="700">Llama 3.1 8B weights</text>
+  <text x="520" y="26" class="t" font-size="13" font-weight="700">Time to read them once (H100)</text>
+  {rows.map((r, i) => {
+    const y = 50 + i * 58;
+    const ms = (r.gb * 1e9) / 3.35e12 * 1000;
+    return (
+      <g>
+        <text x="20" y={y + 25} class="t mono" font-size="13" font-weight="700">{r.f}</text>
+        <rect x="76" y={y} width={r.gb * scale} height="38" rx="7" class={r.cls} />
+        <text x={84 + r.gb * scale} y={y + 25} class={i === 0 ? 't2 mono' : 'ta mono'} font-size="12.5" font-weight="700">{r.gb >= 10 ? r.gb.toFixed(0) : r.gb.toFixed(1)} GB</text>
+        <rect x="520" y={y} width={ms * 24} height="38" rx="7" class={i === 0 ? 'amber' : 'green'} />
+        <text x={528 + ms * 24} y={y + 25} class={i === 0 ? 'tam mono' : 'tg mono'} font-size="12.5" font-weight="700">{ms.toFixed(1)} ms</text>
+      </g>
+    );
+  })}
+  <text x="20" y="236" class="t3" font-size="11">INT4 includes about 6% extra for scales (group size 128). Real INT4 checkpoints are often bigger because some layers stay in 16 bits.</text>
+</svg>
