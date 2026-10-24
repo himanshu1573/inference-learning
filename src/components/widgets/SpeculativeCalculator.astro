@@ -1,0 +1,431 @@
+---
+// Interactive speculative decoding calculator.
+//   expected tokens per step  E = (1 − α^(k+1)) / (1 − α)
+//   time per step             = k · c · T + T   (verify assumed to cost one normal step)
+//   speedup                   = E / (k · c + 1)
+interface Props {
+  alpha?: number;
+  k?: number;
+  c?: number;
+  t?: number;
+}
+const { alpha = 0.8, k = 4, c = 0.1, t = 4.8 } = Astro.props;
+const presets = [
+  { id: 'draft', label: 'Small draft model', alpha: 0.7, k: 4, c: 0.1 },
+  { id: 'head', label: 'Light draft head', alpha: 0.75, k: 5, c: 0.03 },
+  { id: 'ngram', label: 'N-gram lookup', alpha: 0.5, k: 3, c: 0 },
+];
+---
+<div class="spc card" data-spec-calc data-alpha={alpha} data-k={k} data-c={c} data-t={t}>
+  <div class="spc-head">
+    <div class="spc-title">
+      <strong>Speculative decoding calculator</strong>
+      <span class="live-pill">live</span>
+    </div>
+  </div>
+  <p class="spc-sub">Choose how good and how cheap the draft is. See how many tokens one step gives you, and the speedup.</p>
+
+  <div class="spc-presets" role="group" aria-label="Example settings">
+    {presets.map((p) => (
+      <button type="button" data-preset={p.id} data-alpha={p.alpha} data-k={p.k} data-c={p.c}>{p.label}</button>
+    ))}
+  </div>
+
+  <div class="spc-body">
+    <div class="spc-controls">
+      <label class="spc-field">
+        <span class="spc-row"><span class="spc-label">Acceptance rate <span class="spc-sym">α</span></span><span class="spc-val"><b data-out="alpha"></b></span></span>
+        <input type="range" data-in="alpha" min="0.3" max="0.95" step="0.05" />
+        <span class="spc-scale"><span>0.30</span><span>0.95</span></span>
+      </label>
+      <label class="spc-field">
+        <span class="spc-row"><span class="spc-label">Draft length <span class="spc-sym">k</span></span><span class="spc-val"><b data-out="k"></b> tokens</span></span>
+        <input type="range" data-in="k" min="1" max="10" step="1" />
+        <span class="spc-scale"><span>1</span><span>10</span></span>
+      </label>
+      <label class="spc-field">
+        <span class="spc-row"><span class="spc-label">Draft cost <span class="spc-sym">c</span></span><span class="spc-val"><b data-out="c"></b> × target step</span></span>
+        <input type="range" data-in="c" min="0" max="0.5" step="0.01" />
+        <span class="spc-scale"><span>0 (free)</span><span>0.5</span></span>
+      </label>
+      <label class="spc-field">
+        <span class="spc-row"><span class="spc-label">Target step time <span class="spc-sym">T</span></span><span class="spc-val"><b data-out="t"></b> ms</span></span>
+        <input type="range" data-in="t" min="1" max="50" step="0.2" />
+        <span class="spc-scale"><span>1 ms</span><span>50 ms</span></span>
+      </label>
+    </div>
+    <div class="spc-plot">
+      <span class="spc-plot-title">Speedup for each draft length <span class="spc-sym">k</span></span>
+      <svg data-plot viewBox="0 0 400 230" role="img" aria-label="Bar chart of speedup for draft lengths 1 to 10, with the current draft length highlighted"></svg>
+    </div>
+  </div>
+
+  <div class="spc-results">
+    <div class="spc-cell"><span class="spc-k">Tokens per step</span><span class="spc-v" data-out="E"></span><span class="spc-s">on average</span></div>
+    <div class="spc-cell"><span class="spc-k">Step time</span><span class="spc-v" data-out="step"></span><span class="spc-s" data-out="split"></span></div>
+    <div class="spc-cell"><span class="spc-k">Tokens / s</span><span class="spc-v" data-out="tps"></span><span class="spc-s" data-out="base"></span></div>
+    <div class="spc-cell"><span class="spc-k">Speedup</span><span class="spc-v" data-out="speed"></span><span class="spc-s" data-out="best"></span></div>
+  </div>
+  <div class="spc-formula mono" data-out="formula"></div>
+  <p class="spc-note">Simple model for one user (small batch): the verify step is assumed to cost the same as one normal step, which is true when decode is memory-bound. At large batch sizes, verifying costs more and the speedup shrinks. Preset values are illustrative, not measurements.</p>
+</div>
+
+<script>
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function el(tag: string, attrs: Record<string, string | number>, text?: string) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function setFill(input: HTMLInputElement) {
+    const min = Number(input.min), max = Number(input.max), v = Number(input.value);
+    input.style.setProperty('--fill', `${((v - min) / (max - min)) * 100}%`);
+  }
+
+  const expected = (a: number, k: number) => (a >= 0.999 ? k + 1 : (1 - a ** (k + 1)) / (1 - a));
+  const speedup = (a: number, k: number, c: number) => expected(a, k) / (k * c + 1);
+
+  function init(root: HTMLElement) {
+    const state = {
+      alpha: Number(root.dataset.alpha) || 0.8,
+      k: Number(root.dataset.k) || 4,
+      c: root.dataset.c !== undefined ? Number(root.dataset.c) : 0.1,
+      t: Number(root.dataset.t) || 4.8,
+    };
+    const q = <T extends Element>(sel: string) => root.querySelector<T>(sel)!;
+    const out = (name: string) => q<HTMLElement>(`[data-out="${name}"]`);
+    const inputs = {
+      alpha: q<HTMLInputElement>('[data-in="alpha"]'),
+      k: q<HTMLInputElement>('[data-in="k"]'),
+      c: q<HTMLInputElement>('[data-in="c"]'),
+      t: q<HTMLInputElement>('[data-in="t"]'),
+    };
+    const svg = q<SVGSVGElement>('[data-plot]');
+
+    function syncInputs() {
+      inputs.alpha.value = String(state.alpha);
+      inputs.k.value = String(state.k);
+      inputs.c.value = String(state.c);
+      inputs.t.value = String(state.t);
+    }
+
+    function render() {
+      const { alpha, k, c, t } = state;
+      const E = expected(alpha, k);
+      const draftMs = k * c * t;
+      const stepMs = draftMs + t;
+      const tps = (E / stepMs) * 1000;
+      const base = 1000 / t;
+      const s = speedup(alpha, k, c);
+      let bestK = 1;
+      let bestS = 0;
+      for (let kk = 1; kk <= 10; kk++) {
+        const v = speedup(alpha, kk, c);
+        if (v > bestS) { bestS = v; bestK = kk; }
+      }
+
+      out('alpha').textContent = alpha.toFixed(2);
+      out('k').textContent = String(k);
+      out('c').textContent = c.toFixed(2);
+      out('t').textContent = t.toFixed(1);
+      out('E').textContent = E.toFixed(2);
+      out('step').textContent = `${stepMs.toFixed(2)} ms`;
+      out('split').textContent = `draft ${draftMs.toFixed(2)} + verify ${t.toFixed(2)}`;
+      out('tps').textContent = tps >= 100 ? Math.round(tps).toLocaleString('en-US') : tps.toFixed(1);
+      out('base').textContent = `normal: ${base >= 100 ? Math.round(base) : base.toFixed(1)} / s`;
+      const sp = out('speed');
+      sp.textContent = `${s.toFixed(2)}×`;
+      sp.classList.toggle('is-bad', s < 1);
+      out('best').textContent = `best k here: ${bestK} (${bestS.toFixed(2)}×)`;
+      out('formula').textContent =
+        `E = (1 − ${alpha.toFixed(2)}^${k + 1}) / (1 − ${alpha.toFixed(2)}) = ${E.toFixed(2)}   ·   speedup = ${E.toFixed(2)} / (${k} × ${c.toFixed(2)} + 1) = ${s.toFixed(2)}×`;
+
+      root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) => {
+        const on = Number(b.dataset.alpha) === alpha && Number(b.dataset.k) === k && Number(b.dataset.c) === c;
+        b.setAttribute('aria-pressed', String(on));
+      });
+      Object.values(inputs).forEach(setFill);
+
+      // ---- chart: speedup vs k ----
+      svg.replaceChildren();
+      const L = 34, R = 392, T = 12, B = 196;
+      const vals = Array.from({ length: 10 }, (_, i) => speedup(alpha, i + 1, c));
+      const maxV = Math.max(2, Math.ceil(Math.max(...vals) * 2) / 2);
+      const y = (v: number) => B - (v / maxV) * (B - T);
+      const slot = (R - L) / 10;
+      for (let g = 0; g <= maxV; g += maxV > 4 ? 1 : 0.5) {
+        svg.append(el('line', { x1: L, y1: y(g), x2: R, y2: y(g), class: 'spc-grid' }));
+        svg.append(el('text', { x: L - 6, y: y(g) + 4, class: 'spc-tick', 'text-anchor': 'end' }, `${g}×`));
+      }
+      vals.forEach((v, i) => {
+        const x = L + i * slot + 4;
+        const cls = i + 1 === k ? 'spc-bar is-on' : v < 1 ? 'spc-bar is-bad' : 'spc-bar';
+        svg.append(el('rect', { x, y: y(v), width: slot - 8, height: Math.max(1, B - y(v)), rx: 3, class: cls }));
+        svg.append(el('text', { x: x + (slot - 8) / 2, y: B + 15, class: 'spc-tick', 'text-anchor': 'middle' }, String(i + 1)));
+        if (i + 1 === k) {
+          svg.append(el('text', { x: x + (slot - 8) / 2, y: y(v) - 6, class: 'spc-lbl', 'text-anchor': 'middle' }, `${v.toFixed(2)}×`));
+        }
+      });
+      svg.append(el('line', { x1: L, y1: y(1), x2: R, y2: y(1), class: 'spc-one' }));
+      svg.append(el('text', { x: (L + R) / 2, y: B + 32, class: 'spc-axis', 'text-anchor': 'middle' }, 'draft length k'));
+    }
+
+    root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.alpha = Number(b.dataset.alpha);
+        state.k = Number(b.dataset.k);
+        state.c = Number(b.dataset.c);
+        syncInputs();
+        render();
+      }),
+    );
+    (Object.keys(inputs) as (keyof typeof inputs)[]).forEach((key) => {
+      inputs[key].addEventListener('input', () => {
+        state[key] = Number(inputs[key].value);
+        render();
+      });
+    });
+    syncInputs();
+    render();
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-spec-calc]').forEach(init);
+</script>
+
+<style is:global>
+  .spc {
+    margin: 2.2em 0;
+    padding: 18px 20px 16px;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .spc-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+  }
+  .spc-sub {
+    margin: 6px 0 12px !important;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  .spc-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+  .spc-presets button {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .spc-presets button:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+  .spc-presets button[aria-pressed='true'] {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .spc-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .spc-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .spc-field {
+    display: block;
+    padding: 10px 12px 6px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .spc-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .spc-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-2);
+  }
+  .spc-sym {
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--accent-text);
+  }
+  .spc-val {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .spc-val b {
+    font-size: 15px;
+    color: var(--text);
+    margin-right: 2px;
+  }
+  .spc-scale {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-3);
+  }
+  .spc-plot {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    padding: 10px 8px 4px;
+  }
+  .spc-plot-title {
+    display: block;
+    padding: 0 6px 4px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .spc-plot svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    font-family: var(--font-mono);
+  }
+  .spc-grid {
+    stroke: var(--border-strong);
+    stroke-dasharray: 2 4;
+  }
+  .spc-one {
+    stroke: var(--text-2);
+    stroke-dasharray: 5 4;
+  }
+  .spc-tick {
+    fill: var(--text-3);
+    font-size: 10px;
+  }
+  .spc-axis {
+    fill: var(--text-2);
+    font-size: 10.5px;
+    font-family: 'Inter', ui-sans-serif, sans-serif;
+  }
+  .spc-lbl {
+    fill: var(--accent-text);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .spc-bar {
+    fill: var(--accent-soft);
+    stroke: var(--accent);
+    stroke-width: 1;
+  }
+  .spc-bar.is-on {
+    fill: var(--accent);
+  }
+  .spc-bar.is-bad {
+    fill: var(--red-soft);
+    stroke: var(--red);
+  }
+  .spc-results {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .spc-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border-left: 1px solid var(--border);
+    min-width: 0;
+  }
+  .spc-cell:first-child {
+    border-left: 0;
+  }
+  .spc-k {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .spc-v {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--accent-text);
+    white-space: nowrap;
+  }
+  .spc-v.is-bad {
+    color: var(--red);
+  }
+  .spc-s {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-3);
+  }
+  .spc-formula {
+    margin-top: 12px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    font-size: 11.5px;
+    color: var(--text-2);
+    overflow-wrap: anywhere;
+  }
+  .spc-note {
+    margin-top: 10px !important;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-3);
+  }
+  @media (max-width: 760px) {
+    .spc-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .spc-results {
+      grid-template-columns: 1fr 1fr;
+    }
+    .spc-cell:nth-child(3) {
+      border-left: 0;
+    }
+    .spc-cell:nth-child(n + 3) {
+      border-top: 1px solid var(--border);
+    }
+  }
+  @media (max-width: 420px) {
+    .spc {
+      padding: 14px 12px;
+    }
+  }
+</style>
