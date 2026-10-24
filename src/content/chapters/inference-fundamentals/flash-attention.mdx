@@ -1,0 +1,420 @@
+---
+title: 'FlashAttention'
+description: 'Attention that respects the memory hierarchy: tiling, the online softmax trick, and why the same exact math becomes several times faster. Plus FlashDecoding for long-context decode.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import FaNaiveFlow from '../../../components/figures/inference-fundamentals/FaNaiveFlow.astro';
+import FaTiling from '../../../components/figures/inference-fundamentals/FaTiling.astro';
+import FaOnlineSoftmax from '../../../components/figures/inference-fundamentals/FaOnlineSoftmax.astro';
+import FaTrafficBars from '../../../components/figures/inference-fundamentals/FaTrafficBars.astro';
+import FaFlashDecoding from '../../../components/figures/inference-fundamentals/FaFlashDecoding.astro';
+
+Attention is the only part of a transformer whose cost grows with the **square** of the text length. Double the prompt, and attention does four times more work. For years, people tried to make attention cheaper by changing the math, giving up some accuracy. Then, in 2022, Tri Dao and his co-authors published **FlashAttention**. It computes **exactly the same** result as normal attention, with no approximation, but several times faster. The trick is not new math. The trick is **moving data in a smarter way**, using exactly the ideas from the [memory hierarchy chapter](/gpu-hardware/memory-hierarchy). Today, almost every serving engine uses FlashAttention or a kernel built on its ideas.
+
+<NewWords
+  words={[
+    { word: 'Kernel', meaning: 'One program that runs on the GPU. A model runs many kernels, one after another.' },
+    { word: 'HBM', meaning: 'The big main memory of the GPU (80 GB on an H100). Large, but each trip to it takes time.' },
+    { word: 'SRAM', meaning: 'The small, very fast memory inside each SM (shared memory and registers). Only a few hundred KB per SM.' },
+    { word: 'Tile', meaning: 'A small square piece of a big matrix, small enough to fit in SRAM.' },
+    { word: 'Softmax', meaning: 'A function that turns a list of scores into weights that are all positive and add up to 1.' },
+    { word: 'Online softmax', meaning: 'A way to compute softmax piece by piece, fixing earlier results when a bigger score appears.' },
+    { word: 'Kernel fusion', meaning: 'Doing several steps inside one kernel, so the data in between never goes to HBM.' },
+    { word: 'IO-aware', meaning: 'Designed to reduce data movement (input/output to memory), not only the number of calculations.' },
+  ]}
+/>
+
+## Attention as three matrix steps
+
+Let us write attention for **one head** as math. If the text has $N$ tokens and each head has $d$ numbers ($d = 128$ for Llama 3.1), we have three matrices with $N$ rows and $d$ columns: the queries $Q$, the keys $K$ and the values $V$. Attention is three steps:
+
+1. **Scores.** Compare every query with every key:
+
+   $$
+   S = \frac{Q K^{\top}}{\sqrt{d}} \qquad (N \times N)
+   $$
+
+2. **Weights.** Apply softmax to each row of $S$, so each row adds up to 1:
+
+   $$
+   P = \text{softmax}(S) \qquad (N \times N)
+   $$
+
+3. **Output.** Mix the values with these weights:
+
+   $$
+   O = P \, V \qquad (N \times d)
+   $$
+
+(For an LLM, a causal mask also sets the scores of future tokens to $-\infty$, so their weights become 0. We ignore it here; it does not change the ideas.)
+
+Look at the shapes. $Q$, $K$, $V$ and $O$ are $N \times d$: they grow **linearly** with the text. But $S$ and $P$ are $N \times N$: they grow with the **square** of the text. This is where the trouble starts.
+
+This chapter is mostly about **prefill**, where all $N$ prompt tokens are processed together and the full $N \times N$ matrices appear. At the end we look at **decode**, which has a different problem.
+
+## The naive way: three kernels and two giant matrices
+
+A simple implementation runs each step as its own kernel. Each kernel reads its inputs from HBM, computes, and writes its result back to HBM, because that is the only place big enough to hold it.
+
+<Figure n="9.1" title="Naive attention moves giant matrices through HBM" caption="Kernel 1 computes the scores S and writes all N × N of them to HBM. Kernel 2 reads S back, computes softmax, and writes P. Kernel 3 reads P back and multiplies by V. The red arrows carry the two N × N matrices. For one head at 8,192 tokens, they are about 134 MB each, much bigger than Q, K, V and O together.">
+  <FaNaiveFlow />
+</Figure>
+
+<Derivation title="Memory traffic and intensity of naive attention (one head, N = 8,192, d = 128, BF16)" result="About 545 MB of HBM traffic for only 34 GFLOPs: an intensity of about 63 FLOPs per byte, well below the H100 ridge point of 295. Naive attention is memory-bound.">
+
+1. Size of $Q$, $K$, $V$ or $O$:
+
+   $$
+   8{,}192 \times 128 \times 2 \text{ bytes} \approx 2.1 \text{ MB each}
+   $$
+
+2. Size of $S$ or $P$:
+
+   $$
+   8{,}192 \times 8{,}192 \times 2 \text{ bytes} \approx 134 \text{ MB each}
+   $$
+
+3. Traffic: write $S$, read $S$, write $P$, read $P$, plus reading $Q$, $K$, $V$ and writing $O$:
+
+   $$
+   4 \times 134.2 + 4 \times 2.1 \approx 537 + 8.4 \approx 545 \text{ MB}
+   $$
+
+4. FLOPs: $QK^{\top}$ and $PV$ each need $2 \times N \times N \times d$:
+
+   $$
+   2 \times 2 \times 8{,}192^2 \times 128 \approx 34.4 \text{ GFLOPs}
+   $$
+
+5. Arithmetic intensity:
+
+   $$
+   \frac{34.4 \times 10^{9}}{545 \times 10^{6}} \approx 63 \text{ FLOPs per byte}
+   $$
+
+</Derivation>
+
+Now scale this up to the whole model. Llama 3.1 8B has 32 query heads in each of its 32 layers, so a prefill does this $32 \times 32 = 1{,}024$ times.
+
+<Callout type="example" title="Naive attention in a full 8K prefill of Llama 3.1 8B on an H100">
+
+- **Memory time:** $1{,}024 \times 545 \text{ MB} \approx 558 \text{ GB}$. At 3.35 TB/s: about **167 ms**.
+- **Math time:** $1{,}024 \times 34.4 \text{ GFLOPs} \approx 35.2 \text{ TFLOPs}$. At 989 TFLOPS: about **36 ms**.
+
+The GPU could finish the attention math in 36 ms, but it spends about 167 ms moving $S$ and $P$ in and out of HBM. Most of the time is wasted on data that is only needed for a moment.
+
+</Callout>
+
+There is a second problem: **space**. At 128K tokens, one $S$ matrix for one head is $131{,}072^2 \times 2 \approx 34$ GB. A GPU cannot even hold that, let alone for 32 heads.
+
+## The FlashAttention idea: never write S to HBM
+
+Here is the key observation. We do not actually **want** $S$ or $P$. We only want $O$. $S$ and $P$ are temporary helpers. So the plan is:
+
+1. **Fuse** all three steps into **one kernel**, so the intermediate results never leave the chip.
+2. **Tile** the work: cut $Q$, $K$ and $V$ into small blocks that fit in the SRAM of one SM, and process one small **tile** of $S$ at a time.
+
+<Callout type="analogy" title="The cutting board and the basement">
+
+A cook prepares a big meal. The naive cook chops all the vegetables, carries the whole pile down to the basement storage, comes back, carries it up again to season it, takes it down again, and brings it up once more to cook. The smart cook works in small portions on the **cutting board** (SRAM): chop a little, season it, add it to the pot, and repeat. Nothing goes to the basement (HBM) except the finished dish.
+
+</Callout>
+
+<Figure n="9.2" title="Tiling: one block of queries walks across all key-value blocks" caption="An SM loads one block of queries Qᵢ and keeps it. Then it streams in one key-value block after another. For each pair it computes one tile Sᵢⱼ in on-chip memory, uses it to update a running max, a running sum and a running output, and throws the tile away. Only the final output block goes back to HBM. Different SMs handle different query blocks at the same time.">
+  <FaTiling />
+</Figure>
+
+### Does a tile really fit?
+
+<Derivation title="On-chip memory for one tile (block size 128 × 128, d = 128)" result="About 96 KiB in shared memory and 128 KiB in registers. Both fit in one H100 SM (up to 228 KB shared memory and a 256 KB register file).">
+
+1. One block of 128 queries, one of 128 keys and one of 128 values, in BF16:
+
+   $$
+   3 \times 128 \times 128 \times 2 \text{ bytes} = 98{,}304 \text{ bytes} = 96 \text{ KiB}
+   $$
+
+2. The score tile $S_{ij}$, kept in FP32 (4 bytes) for accuracy:
+
+   $$
+   128 \times 128 \times 4 = 65{,}536 \text{ bytes} = 64 \text{ KiB}
+   $$
+
+3. The running output for 128 queries, also FP32:
+
+   $$
+   128 \times 128 \times 4 = 64 \text{ KiB}
+   $$
+
+4. Real kernels keep the inputs in shared memory and the score tile and output in registers. Block sizes are tuned for each GPU and head size, so these numbers are an example, not a rule.
+
+</Derivation>
+
+## The hard part: softmax wants the whole row
+
+Tiling the two matrix multiplications is easy. The problem is the softmax in the middle. For one row of scores $x_1, \dots, x_N$:
+
+$$
+\text{softmax}(x)_i = \frac{e^{x_i}}{\sum_{j=1}^{N} e^{x_j}}
+$$
+
+In practice we also subtract the **maximum** of the row first, because $e^{x}$ quickly becomes too big for small number formats. For example $e^{12} \approx 162{,}755$, which is already larger than the biggest FP16 number (65,504, see [chapter 1.6](/gpu-hardware/number-formats)). Subtracting the max does not change the result, and keeps every exponent at or below 0:
+
+$$
+\text{softmax}(x)_i = \frac{e^{x_i - m}}{\sum_{j} e^{x_j - m}}, \qquad m = \max_j x_j
+$$
+
+Now the problem is clear. To compute even the **first** weight, we need the **max** and the **sum** of the **whole row**. But with tiling, we only see one tile of the row at a time. It looks like we must store the whole row first, which is exactly what we wanted to avoid.
+
+### The online softmax trick
+
+The solution is to keep **running** values, and to **fix** them when new information arrives. For each query row we keep three things:
+
+- $m$: the biggest score seen so far,
+- $\ell$: the sum of $e^{x - m}$ for the scores seen so far,
+- $o$: the sum of $e^{x - m} \cdot v$ for the values seen so far (not yet divided by $\ell$).
+
+When a new block of scores arrives, the max may grow. If it grows from $m_{\text{old}}$ to $m_{\text{new}}$, every old term $e^{x - m_{\text{old}}}$ should have been $e^{x - m_{\text{new}}}$. Since $e^{x - m_{\text{new}}} = e^{x - m_{\text{old}}} \cdot e^{m_{\text{old}} - m_{\text{new}}}$, we fix all old terms at once by multiplying with a single number.
+
+<Derivation title="The online softmax update for one new block of scores" result="After the last block, O = o ÷ ℓ is exactly the normal softmax output, with no N × N matrix ever stored.">
+
+1. Find the new max, using the scores $x_j$ of the new block:
+
+   $$
+   m_{\text{new}} = \max\big(m_{\text{old}}, \; \max_j x_j\big)
+   $$
+
+2. The correction factor for everything computed before:
+
+   $$
+   \alpha = e^{\,m_{\text{old}} - m_{\text{new}}} \quad (\alpha \le 1)
+   $$
+
+3. Update the running sum: fix the old part, add the new block:
+
+   $$
+   \ell_{\text{new}} = \alpha \, \ell_{\text{old}} + \sum_j e^{\,x_j - m_{\text{new}}}
+   $$
+
+4. Update the running output the same way:
+
+   $$
+   o_{\text{new}} = \alpha \, o_{\text{old}} + \sum_j e^{\,x_j - m_{\text{new}}} \, v_j
+   $$
+
+5. After the last block, divide once:
+
+   $$
+   O = \frac{o}{\ell}
+   $$
+
+</Derivation>
+
+Let us check it with tiny numbers. One query has four scores, $1, 3, 2, 5$, and the four values are simple numbers, $10, 20, 30, 40$. We process them in two blocks of two.
+
+<Figure n="9.3" title="Online softmax with real numbers" caption="Block 1 gives a running max of 3, a running sum of 1.135 and a running output of 21.35. Block 2 brings a bigger score (5), so the old sum and output are multiplied by e³⁻⁵ ≈ 0.135 before the new terms are added. The final 44.38 ÷ 1.203 = 36.88 is exactly what normal softmax gives when it sees all four scores at once.">
+  <FaOnlineSoftmax />
+</Figure>
+
+<Callout type="idea">
+
+Online softmax gives the **exact** result, not an approximation. The only cost is a few extra multiplications by $\alpha$, which is tiny compared with the matrix multiplications. This one trick is what makes it possible to compute attention tile by tile.
+
+</Callout>
+
+## How much does FlashAttention save?
+
+With tiling and online softmax, one kernel reads $Q$, $K$ and $V$, does everything on the chip, and writes $O$. Let us count the bytes again.
+
+<Derivation title="HBM traffic of FlashAttention (one head, N = 8,192, d = 128)" result="Ideally about 8.4 MB instead of 545 MB, about 65 times less, and the intensity rises to about 4,096 FLOPs per byte: compute-bound.">
+
+1. **Ideal case:** read $Q$, $K$, $V$ once and write $O$ once:
+
+   $$
+   4 \times 2.1 \text{ MB} \approx 8.4 \text{ MB}
+   $$
+
+2. **Worst case:** each block of 128 queries streams the whole $K$ and $V$ from HBM. There are $8{,}192 \div 128 = 64$ query blocks:
+
+   $$
+   64 \times (2.1 + 2.1) \text{ MB} + 2.1 + 2.1 \approx 272 \text{ MB}
+   $$
+
+3. In practice, $K$ and $V$ of one head (4.2 MB) fit easily in the 50 MB L2 cache, and many query blocks of the same head run at the same time, so most repeated reads are served by L2. Real HBM traffic ends up much closer to the ideal case.
+
+4. Intensity in the ideal case (same 34.4 GFLOPs):
+
+   $$
+   \frac{34.4 \times 10^{9}}{8.4 \times 10^{6}} \approx 4{,}096 \text{ FLOPs per byte}
+   $$
+
+   Far above the ridge point of 295. Attention is now limited by math, not by memory.
+
+</Derivation>
+
+<Figure n="9.4" title="HBM traffic for one head" caption="Naive attention moves about 545 MB per head, mostly the N × N matrices S and P. FlashAttention never stores them. Even if every repeated read of K and V went to HBM, it would move about 272 MB; in the ideal case it moves only about 8.4 MB.">
+  <FaTrafficBars />
+</Figure>
+
+For the full 8K prefill of Llama 3.1 8B, attention goes from about 167 ms (memory-bound) toward the **math limit of about 36 ms**. Real kernels do not reach the full peak (FlashAttention-2 reaches roughly 50% to 70% of peak on an A100), but the gain is still several times. And just as important: memory use for attention is now **linear** in $N$ instead of quadratic, so 128K-token prompts become possible at all.
+
+<KeyNumbers
+  items={[
+    { value: '134 MB', label: 'one S matrix, one head, 8K tokens' },
+    { value: '545 MB', label: 'naive HBM traffic per head' },
+    { value: '~8.4 MB', label: 'FlashAttention, ideal' },
+    { value: '63 → 4,096', label: 'FLOPs per byte, naive → flash' },
+  ]}
+/>
+
+<DeepDive title="The IO complexity result: why N²d²/M is the number that matters">
+
+The FlashAttention paper counts HBM accesses (reads and writes of single numbers) as a function of $N$ (tokens), $d$ (head size) and $M$ (the size of SRAM, in numbers).
+
+**Naive attention** must write and read the $N \times N$ matrices, plus the inputs and output:
+
+$$
+\Theta(N d + N^2)
+$$
+
+**FlashAttention** reads $K$ and $V$ once for every block of queries. A block of queries can have about $B_r \approx M / d$ rows (it must fit in SRAM next to the other tiles). So the number of query blocks is about $N / B_r \approx N d / M$, and each pass reads $K$ and $V$, which is about $2Nd$ numbers:
+
+$$
+\frac{N d}{M} \times N d = \Theta\!\left(\frac{N^2 d^2}{M}\right)
+$$
+
+Compare the two $N^2$ terms: FlashAttention has an extra factor of $d^2 / M$. With $d = 128$, $d^2 = 16{,}384$, and $M$ around a hundred thousand numbers, this factor is well below 1. The bigger the SRAM compared with $d^2$, the bigger the saving. The paper also proves that no exact attention algorithm can do asymptotically better for all values of $M$.
+
+Two honest notes. First, the $\Theta$ notation hides constant factors. For $d = 128$, real kernels use query blocks of about 64 to 128 rows, and the "worst case" count from our derivation (272 MB vs 545 MB) is only about 2× better. Second, real GPUs have an L2 cache between SRAM and HBM. The repeated reads of $K$ and $V$ mostly hit L2, which is why the real gain is much larger than the worst-case count. A naive PyTorch implementation also usually does more passes than our minimal four (scaling, masking, softmax in several steps), so its real traffic is even higher.
+
+</DeepDive>
+
+<Callout type="note" title="What about training?">
+
+During training, the backward pass needs $P$ again. FlashAttention does not store it. Instead it saves only the running max and sum for each row (a few numbers per row) and **recomputes** the tiles of $S$ and $P$ in the backward pass. Recomputing is cheaper than reading 134 MB per head from HBM. For inference there is no backward pass, so this part does not matter to us.
+
+</Callout>
+
+## FlashAttention-2 and FlashAttention-3
+
+The idea stayed the same, but the kernels kept getting better at using the hardware.
+
+| Version | Year | Main improvements | Typical result |
+| --- | --- | --- | --- |
+| FlashAttention | 2022 | Tiling, kernel fusion, online softmax | Several times faster than naive attention, linear memory |
+| FlashAttention-2 | 2023 | Fewer non-matrix operations (divide by $\ell$ only once at the end); parallel over query blocks, not only over batch and heads; better split of work between warps | About 2× faster than version 1; roughly 50–73% of peak on an A100 |
+| FlashAttention-3 | 2024 | Built for Hopper (H100): asynchronous data copies (TMA), warp specialisation (some warps load data while others compute), overlapping softmax with matrix math, FP8 support | Up to about 740 TFLOPS in BF16 (about 75% of H100 peak), close to 1.2 PFLOPS in FP8 |
+
+Two ideas from this table are worth understanding.
+
+- **Fewer non-matrix operations.** Tensor Cores make matrix multiplications extremely fast (see [chapter 1.3](/gpu-hardware/inside-a-gpu)). Other operations, like the exponentials and rescaling in softmax, run on the normal cores, which are about 15 times slower on an H100 (and exponentials are slower still). So even a small amount of non-matrix work can take a big share of the time. FlashAttention-2 moves as much as possible out of the inner loop.
+- **Overlapping.** On an H100, FlashAttention-3 lets some warps copy the next K and V blocks while other warps compute on the current ones, and it overlaps the softmax of one tile with the matrix multiplication of another. The Tensor Cores almost never wait.
+
+## Decode is different: FlashDecoding
+
+Everything so far was about prefill. In **decode**, each sequence has only **one** new query. So $S$ is just $1 \times N$ per head: no giant matrix. The problem in decode is the one we found in the [KV cache chapter](/inference-fundamentals/kv-cache): reading the cache is memory-bound. The kernel must read every cached key and value as fast as HBM allows.
+
+But there is a hidden second problem: **parallelism**. A normal attention kernel gives each (sequence, head) pair to one thread block. With a big batch, there are plenty of blocks. With a **small batch and a long context**, there are not.
+
+<Derivation title="How many SMs work during long-context decode at batch 1?" result="Only about 32 of 132 SMs (about 24%) do any work with a simple kernel. Splitting the cache into 16 chunks gives 512 blocks, enough for all SMs.">
+
+1. Batch 1, Llama 3.1 8B, 32 query heads, one block per head:
+
+   $$
+   1 \times 32 = 32 \text{ blocks}
+   $$
+
+2. An H100 has 132 SMs, so the share that is busy:
+
+   $$
+   \frac{32}{132} \approx 24\%
+   $$
+
+3. Each busy block must read the cache of its head for all 65,536 tokens alone, while about 100 SMs sit idle. And reading HBM at full speed needs **many** SMs sending requests at the same time.
+
+4. FlashDecoding also splits the sequence: cut the 64K cached tokens of each head into 16 chunks of 4K:
+
+   $$
+   32 \times 16 = 512 \text{ blocks}
+   $$
+
+</Derivation>
+
+<Figure n="9.5" title="FlashDecoding: split the long cache to keep every SM busy" caption="Top: with one block per head, only 32 of the 132 SMs work during decode at batch 1. Bottom: FlashDecoding splits each head's 64K-token cache into 16 chunks, so 512 blocks spread over all SMs. Each chunk returns its own partial max, sum and output, and a small final step merges them with the same rescaling rule as online softmax.">
+  <FaFlashDecoding />
+</Figure>
+
+The merge step uses the same math as online softmax. Each chunk $k$ returns its own max $m_k$, sum $\ell_k$ and unnormalised output $o_k$. To combine them, take the global max $m = \max_k m_k$, then:
+
+$$
+\ell = \sum_k e^{\,m_k - m}\, \ell_k, \qquad O = \frac{\sum_k e^{\,m_k - m}\, o_k}{\ell}
+$$
+
+The authors of FlashDecoding (from the FlashAttention team, 2023) reported up to about **8 times faster** generation for very long sequences. With large batches, there are already enough (sequence, head) pairs to fill the GPU, so the split matters less. Good kernels choose the number of chunks automatically.
+
+## Attention kernels in a serving engine
+
+In a real serving engine, there is one more complication. The KV cache is not one neat array per sequence. It is stored in many small **blocks** spread across a big memory pool, as we previewed in the last chapter (**PagedAttention**, [chapter 3.3](/serving-engines/paged-attention)). So the attention kernel must also follow a **block table** to find the keys and values of each sequence.
+
+Modern attention libraries support this directly:
+
+- **FlashAttention** can read a paged KV cache through a block table, and engines like vLLM use it for both prefill and decode.
+- **FlashInfer** is a kernel library made specifically for serving. It handles paged caches, batches of very different lengths, and shared prefixes.
+- Model-specific kernels exist too, such as **FlashMLA** for DeepSeek's latent attention ([chapter 2.8](/inference-fundamentals/attention-variants)).
+
+<Callout type="real" title="Which kernel does my engine use?">
+
+vLLM picks an **attention backend** at startup based on your GPU, the model and its attention design, and it prints the choice in its logs. You can force one with the environment variable `VLLM_ATTENTION_BACKEND` (for example `FLASH_ATTN` or `FLASHINFER`). The best choice depends on the hardware and the workload, so it is worth benchmarking. Backend names and defaults change between versions; check the documentation of your version.
+
+</Callout>
+
+## Check yourself
+
+<Quiz n={1} q="Why is naive attention memory-bound in prefill, even though it does a lot of math?">
+
+Because it writes the N × N score matrix S and the weight matrix P to HBM and reads them back. For one head at 8K tokens that is about 537 MB of traffic for about 34 GFLOPs, an intensity of about 63 FLOPs per byte, which is below the H100 ridge point of about 295.
+
+</Quiz>
+
+<Quiz n={2} q="Does FlashAttention give an approximate result to save time?">
+
+No. It computes exactly the same attention output (up to normal rounding). It only changes the order of the work and where intermediate data lives: tiles of S are computed in SRAM and never written to HBM, and online softmax makes the tile-by-tile computation exact.
+
+</Quiz>
+
+<Quiz n={3} q="In online softmax, the running max goes from 4 to 6. What do you multiply the old running sum and output by?">
+
+By $e^{4 - 6} = e^{-2} \approx 0.135$. This turns every old term $e^{x - 4}$ into $e^{x - 6}$, as if the new max had been known from the start.
+
+</Quiz>
+
+<Quiz n={4} q="Why doesn't FlashAttention's big saving apply to decode in the same way?">
+
+In decode, each sequence has only one query, so there is no N × N matrix to avoid. The cost is reading the KV cache, which must happen anyway. The decode problem is memory bandwidth and, at small batch sizes, keeping enough SMs busy, which FlashDecoding solves by splitting the cache into chunks.
+
+</Quiz>
+
+<Quiz n={5} q="At 128K tokens, how big would one N × N score matrix be for one head in BF16, and why does this matter?">
+
+$131{,}072 \times 131{,}072 \times 2 \approx 34$ GB, for one head of one layer. Naive attention could not even store it. FlashAttention never stores S, so its memory use grows only linearly with the text length.
+
+</Quiz>
+
+<Takeaways>
+
+- Attention has $N \times N$ intermediate matrices ($S$ and $P$). The naive method writes them to HBM, which makes prefill attention **memory-bound** (about 63 FLOPs per byte at 8K).
+- **FlashAttention** fuses everything into one kernel and works on **tiles** that fit in SRAM. $S$ and $P$ never reach HBM.
+- **Online softmax** keeps a running max, sum and output, and fixes old values with one factor $e^{m_{\text{old}} - m_{\text{new}}}$. The result is exact.
+- HBM traffic per head drops from about 545 MB toward about 8.4 MB, attention becomes **compute-bound**, and memory grows **linearly** with the text.
+- FlashAttention-2 and -3 keep the idea and use the hardware better: fewer non-matrix operations, more parallelism, and on H100 asynchronous copies, warp specialisation and FP8.
+- In decode, the problem is reading the KV cache. **FlashDecoding** splits long caches into chunks so all SMs help, then merges the pieces with the same rescaling rule.
+
+</Takeaways>
