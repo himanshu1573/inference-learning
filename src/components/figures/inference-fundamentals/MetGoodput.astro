@@ -1,0 +1,31 @@
+---
+// Throughput vs goodput for two systems with the same SLO.
+const systems = [
+  { name: 'System A', thr: 10, ok: 0.95 },
+  { name: 'System B', thr: 14, ok: 0.6 },
+];
+const X0 = 150, SCALE = 30;
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="System A handles 10 requests per second and 95 percent meet the SLO, so its goodput is 9.5. System B handles 14 requests per second but only 60 percent meet the SLO, so its goodput is 8.4.">
+  <text x="20" y="24" class="t2" font-size="11.5">SLO for every request: TTFT ≤ 500 ms and TPOT ≤ 50 ms</text>
+  {[0, 2, 4, 6, 8, 10, 12, 14, 16].map((v) => (
+    <g>
+      <line x1={X0 + v * SCALE} y1="40" x2={X0 + v * SCALE} y2="196" class="line" stroke-dasharray={v === 0 ? '' : '2 4'} />
+      <text x={X0 + v * SCALE} y="212" class="t3 mono" font-size="10.5" text-anchor="middle">{v}</text>
+    </g>
+  ))}
+  <text x={X0 + 8 * SCALE} y="232" class="t2" font-size="11.5" text-anchor="middle">requests per second</text>
+  {systems.map((s, i) => {
+    const y = 52 + i * 76;
+    const good = s.thr * s.ok;
+    return (
+      <g>
+        <text x={X0 - 14} y={y + 26} class="t" font-size="13" font-weight="700" text-anchor="end">{s.name}</text>
+        <rect x={X0} y={y} width={s.thr * SCALE} height="22" rx="4" class="box2" />
+        <text x={X0 + s.thr * SCALE + 8} y={y + 15} class="t2 mono" font-size="11.5">throughput {s.thr}</text>
+        <rect x={X0} y={y + 28} width={good * SCALE} height="22" rx="4" class={i === 0 ? 'green' : 'amber'} />
+        <text x={X0 + good * SCALE + 8} y={y + 43} class={i === 0 ? 'tg mono' : 'tam mono'} font-size="11.5" font-weight="700">goodput {good.toFixed(1)} ({Math.round(s.ok * 100)}% meet SLO)</text>
+      </g>
+    );
+  })}
+</svg>

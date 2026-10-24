@@ -1,0 +1,50 @@
+---
+// Simple model: Llama 3.1 8B (BF16) on one H100, 2,048 tokens of context per sequence.
+// TPOT(B) = weights / bandwidth + B × (KV cache per sequence) / bandwidth
+const W_MS = 16.06e9 / 3.35e12 * 1000;           // ≈ 4.79 ms to read the weights
+const KV_MS = 2048 * 131072 / 3.35e12 * 1000;    // ≈ 0.080 ms per sequence
+const tpot = (b: number) => W_MS + b * KV_MS;
+const X0 = 76, X1 = 640, Y0 = 40, Y1 = 230;
+const xOf = (b: number) => X0 + (Math.log2(b) / 7) * (X1 - X0);
+const yUser = (v: number) => Y1 - (v / 220) * (Y1 - Y0);
+const yTotal = (v: number) => Y1 - (v / 11000) * (Y1 - Y0);
+const pts = (f: (b: number) => number, y: (v: number) => number) => {
+  const p: string[] = [];
+  for (let i = 0; i <= 56; i++) {
+    const b = Math.pow(2, i / 8);
+    p.push(`${xOf(b).toFixed(1)},${y(f(b)).toFixed(1)}`);
+  }
+  return 'M' + p.join(' L');
+};
+const user = (b: number) => 1000 / tpot(b);
+const total = (b: number) => (b * 1000) / tpot(b);
+const marks = [1, 8, 32, 128];
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Chart: as batch size grows from 1 to 128, tokens per second for each user falls from about 205 to about 67, while total tokens per second for the GPU rises from about 205 to about 8,500 and starts to flatten.">
+  {[0, 0.25, 0.5, 0.75, 1].map((f) => (
+    <line x1={X0} y1={Y1 - f * (Y1 - Y0)} x2={X1} y2={Y1 - f * (Y1 - Y0)} class="line" stroke-dasharray={f === 0 ? '' : '2 4'} />
+  ))}
+  {[0, 55, 110, 165, 220].map((v) => (
+    <text x={X0 - 8} y={yUser(v) + 4} class="tam mono" font-size="10.5" text-anchor="end">{v}</text>
+  ))}
+  {[0, 2750, 5500, 8250, 11000].map((v) => (
+    <text x={X1 + 8} y={yTotal(v) + 4} class="ta mono" font-size="10.5">{v.toLocaleString('en-US')}</text>
+  ))}
+  {[1, 2, 4, 8, 16, 32, 64, 128].map((b) => (
+    <text x={xOf(b)} y={Y1 + 18} class="t3 mono" font-size="10.5" text-anchor="middle">{b}</text>
+  ))}
+  <text x={(X0 + X1) / 2} y={Y1 + 38} class="t2" font-size="11.5" text-anchor="middle">batch size (users decoding together)</text>
+  <text x="10" y="24" class="tam" font-size="11.5" font-weight="600">tokens/s per user</text>
+  <text x="712" y="24" class="ta" font-size="11.5" font-weight="600" text-anchor="end">total tokens/s</text>
+
+  <path d={pts(user, yUser)} class="sam" stroke-width="2.4" />
+  <path d={pts(total, yTotal)} class="line-a" stroke-width="2.4" />
+  {marks.map((b) => (
+    <g>
+      <circle cx={xOf(b)} cy={yUser(user(b))} r="4" class="tam" />
+      <circle cx={xOf(b)} cy={yTotal(total(b))} r="4" class="fill-a" />
+      <text x={xOf(b) + (b === 128 ? -8 : 8)} y={yTotal(total(b)) + (b === 32 ? 18 : -9)} class="ta mono" font-size="10.5" font-weight="600" text-anchor={b === 128 ? 'end' : 'start'}>{Math.round(total(b)).toLocaleString('en-US')}</text>
+      <text x={xOf(b) + (b === 128 ? -8 : 8)} y={yUser(user(b)) + (b === 1 ? 16 : -9)} class="tam mono" font-size="10.5" font-weight="600" text-anchor={b === 128 ? 'end' : 'start'}>{Math.round(user(b))}</text>
+    </g>
+  ))}
+</svg>
