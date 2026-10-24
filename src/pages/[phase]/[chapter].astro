@@ -15,8 +15,9 @@ export function getStaticPaths() {
 interface Props { phase: Phase; chapter: ChapterPlan; index: number }
 const { phase, chapter, index } = Astro.props;
 const id = `${phase.slug}/${chapter.slug}`;
-const entry = await getEntry('chapters', id);
 const ready = await getReadyIds();
+// Only look up chapters that exist, so planned chapters don't log warnings.
+const entry = ready.has(id) ? await getEntry('chapters', id) : undefined;
 
 const rendered = entry ? await render(entry) : null;
 const Content = rendered?.Content;
