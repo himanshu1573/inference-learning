@@ -1,0 +1,383 @@
+---
+title: 'Sampling: Choosing the Next Token'
+description: 'How 128,256 raw scores become one chosen token: softmax, greedy decoding, temperature, top-k, top-p, min-p, penalties, seeds and structured output, with worked numbers.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import SmpPipeline from '../../../components/figures/inference-fundamentals/SmpPipeline.astro';
+import SmpTemperature from '../../../components/figures/inference-fundamentals/SmpTemperature.astro';
+import SmpFilters from '../../../components/figures/inference-fundamentals/SmpFilters.astro';
+import SmpConstrained from '../../../components/figures/inference-fundamentals/SmpConstrained.astro';
+import SamplingPlayground from '../../../components/widgets/SamplingPlayground.astro';
+
+At the end of every forward pass, the model gives a score to **every token in its vocabulary**: 128,256 numbers for Llama 3.1. But we can only write **one** token. How do we choose? This choice is called **sampling**. It is a small piece of code, but it decides whether the answer is boring or creative, repeatable or different every time, valid JSON or broken text. When you set `temperature` or `top_p` in an API call, this is the part you are changing.
+
+<NewWords
+  words={[
+    { word: 'Logit', meaning: 'A raw score for one token. Higher means more likely. Logits can be any number, even negative.' },
+    { word: 'Softmax', meaning: 'A formula that turns a list of scores into probabilities between 0 and 1 that add up to 1.' },
+    { word: 'Probability distribution', meaning: 'A list of chances for every possible outcome, adding up to 100%.' },
+    { word: 'Greedy decoding', meaning: 'Always picking the token with the highest score. No randomness.' },
+    { word: 'Temperature', meaning: 'A number that makes the chances sharper (below 1) or flatter (above 1) before choosing.' },
+    { word: 'Top-k', meaning: 'Keep only the k most likely tokens, then choose among them.' },
+    { word: 'Top-p (nucleus)', meaning: 'Keep the smallest group of top tokens whose chances add up to at least p.' },
+    { word: 'Seed', meaning: 'A starting number for the random generator. The same seed gives the same random choices.' },
+    { word: 'Constrained decoding', meaning: 'Blocking tokens that would break a required format, such as JSON.' },
+  ]}
+/>
+
+## The simple picture: a weighted dice
+
+Imagine a dice with 128,256 sides. But it is not a fair dice: some sides are much bigger than others. The model's job is to decide **how big each side is**. Sampling is the act of **rolling the dice**.
+
+- If one side is huge (99%), almost every roll lands on it. The answer is predictable.
+- If many sides are similar in size, rolls land in different places. The answer is varied, and sometimes surprising.
+
+All the settings in this chapter (temperature, top-k, top-p and so on) are ways to **reshape the dice before rolling it**.
+
+<Figure n="5.1" title="The sampling pipeline" caption="The model produces logits. Optional steps change them: penalties for repeated tokens, temperature, and filters that remove unlikely tokens. Softmax turns the result into probabilities, and a random draw picks one token.">
+  <SmpPipeline />
+</Figure>
+
+## From logits to probabilities: softmax
+
+The LM head gives **logits**: raw scores like 3.0, 2.0, −1.5. They are not probabilities. They can be negative, and they do not add up to anything special. **Softmax** fixes this in two steps:
+
+1. Take $e^{x}$ of every logit. This makes every number positive, and it makes big scores **much** bigger than small ones.
+2. Divide each result by the sum of all results. Now they add up to 1.
+
+$$
+p_i = \frac{e^{z_i}}{\sum_{j} e^{z_j}}
+$$
+
+Here $z_i$ is the logit of token $i$, and $p_i$ is its probability.
+
+<Derivation title="Softmax by hand: 4 tokens" result="pizza 64.4%, pasta 23.7%, sushi 8.7%, rice 3.2%.">
+
+1. The prompt is "My favourite food is". Imagine the model has only four tokens, with these logits:
+
+   $$
+   z = [\,3.0,\ 2.0,\ 1.0,\ 0.0\,] \quad \text{for} \quad [\text{pizza, pasta, sushi, rice}]
+   $$
+
+2. Take $e^{z}$ of each:
+
+   $$
+   e^{3} \approx 20.09, \quad e^{2} \approx 7.39, \quad e^{1} \approx 2.72, \quad e^{0} = 1
+   $$
+
+3. Add them up:
+
+   $$
+   20.09 + 7.39 + 2.72 + 1 = 31.19
+   $$
+
+4. Divide each by the sum:
+
+   $$
+   p \approx [\,0.644,\ 0.237,\ 0.087,\ 0.032\,]
+   $$
+
+</Derivation>
+
+Look at the result. The logits were evenly spaced (3, 2, 1, 0), but the probabilities are not: each step of 1 in the logit makes the chance about **2.7 times** bigger (that is $e^1$). This is why small differences in logits matter so much.
+
+<Callout type="note">
+
+In real code, engines first subtract the biggest logit from all logits before taking $e^x$. The result is exactly the same (the common factor cancels in the division), but it avoids numbers so big that they overflow. This is a standard trick called "stable softmax".
+
+</Callout>
+
+## Greedy decoding: always take the top token
+
+The simplest method: **ignore the dice and always take the biggest side**. In our example, the model writes "pizza" every single time.
+
+$$
+\text{next token} = \arg\max_i \; z_i
+$$
+
+Greedy decoding is:
+
+- **Fast and simple.** You do not even need softmax: the token with the biggest logit also has the biggest probability.
+- **Repeatable.** The same prompt gives the same answer (almost always; see the deep dive on determinism below).
+- **Good for tasks with one right answer**: maths, code, extracting a date from a text.
+
+But greedy has a weakness. For open-ended writing, it often becomes **boring and repetitive**. The most likely next word is not always the best choice for the whole sentence, and greedy text can fall into loops like "I like it. I like it. I like it."
+
+## Temperature: sharper or flatter
+
+Temperature is the most used setting. Before softmax, **divide every logit by a number $T$**:
+
+$$
+p_i = \frac{e^{z_i / T}}{\sum_{j} e^{z_j / T}}
+$$
+
+- $T = 1$: no change.
+- $T < 1$ (for example 0.5): the differences between logits become **bigger**, so the top token becomes even more likely. Text becomes more focused and safe.
+- $T > 1$ (for example 2): the differences become **smaller**, so the chances become more equal. Text becomes more varied and creative, and also more likely to make mistakes.
+- $T \to 0$: becomes greedy. (Engines treat temperature 0 as "use greedy", because dividing by 0 is not allowed.)
+
+<Derivation title="The same logits at three temperatures" result="At T = 0.5, pizza gets 86.5%. At T = 2, pizza gets only 45.5% and rice rises from 0.2% to 10.2%.">
+
+1. **T = 0.5.** Divide the logits by 0.5: $[6, 4, 2, 0]$. Then:
+
+   $$
+   e^{6} \approx 403.4,\ e^{4} \approx 54.6,\ e^{2} \approx 7.39,\ e^{0} = 1, \quad \text{sum} \approx 466.4
+   $$
+
+   $$
+   p \approx [\,0.865,\ 0.117,\ 0.016,\ 0.002\,]
+   $$
+
+2. **T = 1.** No change: $p \approx [\,0.644,\ 0.237,\ 0.087,\ 0.032\,]$.
+
+3. **T = 2.** Divide by 2: $[1.5, 1.0, 0.5, 0]$. Then:
+
+   $$
+   e^{1.5} \approx 4.48,\ e^{1} \approx 2.72,\ e^{0.5} \approx 1.65,\ e^{0} = 1, \quad \text{sum} \approx 9.85
+   $$
+
+   $$
+   p \approx [\,0.455,\ 0.276,\ 0.167,\ 0.102\,]
+   $$
+
+</Derivation>
+
+<Figure n="5.2" title="Temperature reshapes the dice" caption="The logits are the same in all three groups. Low temperature gives almost all the chance to the top token. High temperature spreads the chance more evenly.">
+  <SmpTemperature />
+</Figure>
+
+<Callout type="analogy" title="Temperature is a confidence dial">
+
+Think of temperature as a **confidence dial**. Turn it down, and the model acts very sure of itself: it almost always says its first idea. Turn it up, and the model acts less sure: it is willing to try its second, third or tenth idea.
+
+</Callout>
+
+## Filters: cutting off the long tail
+
+With 128,256 tokens, even a tiny probability per token adds up. Suppose the top 20 tokens are sensible, and the other 128,236 each have a chance of 0.00002%. Together, those strange tokens still have about **2.5%** of the probability. So roughly one token in 40 would be nonsense. In a 400-token answer, that is about 10 strange words!
+
+**Filters** solve this by removing unlikely tokens **before** the dice is rolled. After a filter, the remaining chances are scaled up so they add to 100% again (this is called **renormalising**).
+
+### Top-k: keep a fixed number
+
+Keep only the $k$ tokens with the highest chance. Remove all others.
+
+With $k = 2$ in our example, we keep pizza (64.4%) and pasta (23.7%). Their sum is 88.1%. Renormalise:
+
+$$
+\text{pizza} = \frac{0.644}{0.881} \approx 73.1\%, \qquad \text{pasta} = \frac{0.237}{0.881} \approx 26.9\%
+$$
+
+Top-k is simple, but the number $k$ does not adapt. When the model is very sure (one token at 99%), $k = 50$ still keeps 49 bad options. When the model is unsure (many good options), $k = 5$ may remove good ones.
+
+### Top-p (nucleus sampling): keep a fixed amount of chance
+
+Sort tokens by chance. Keep adding tokens until their total reaches $p$. Remove the rest. This keeps a **flexible** number of tokens: few when the model is sure, many when it is not.
+
+<Derivation title="Top-p = 0.9 by hand" result="Keep pizza, pasta and sushi. After renormalising: 66.5%, 24.5%, 9.0%.">
+
+1. Sort the tokens and add up their chances one by one:
+
+   $$
+   \text{pizza } 0.644 \;\to\; \text{sum} = 0.644
+   $$
+
+   $$
+   \text{pasta } 0.237 \;\to\; \text{sum} = 0.881
+   $$
+
+   $$
+   \text{sushi } 0.087 \;\to\; \text{sum} = 0.968
+   $$
+
+2. The sum first reaches 0.9 at sushi, so we keep the first three tokens. Rice is removed.
+
+3. Renormalise by dividing by 0.968:
+
+   $$
+   [\,0.665,\ 0.245,\ 0.090\,]
+   $$
+
+</Derivation>
+
+### Min-p: keep tokens that are not too far behind
+
+A newer, simple filter. Keep every token whose chance is at least $\text{min-p} \times$ (the chance of the top token). With min-p = 0.1 in our example, the threshold is $0.1 \times 64.4\% = 6.4\%$. Pizza, pasta and sushi stay; rice (3.2%) is removed. Like top-p, it adapts: when the top token is very strong, the threshold is high and few tokens survive.
+
+<Figure n="5.3" title="Three filters on the same distribution" caption="Top-k keeps a fixed number of tokens. Top-p keeps tokens until their chances add up to p. Min-p keeps tokens whose chance is at least a fraction of the top chance. After filtering, the kept chances are scaled to add up to 100%.">
+  <SmpFilters />
+</Figure>
+
+<Callout type="real" title="Typical settings">
+
+APIs and engines such as vLLM accept `temperature`, `top_p`, `top_k` and `min_p` in each request. Common choices are: temperature 0 for code and data extraction; temperature around 0.6 to 0.8 with top-p around 0.9 to 0.95 for chat; higher temperature for brainstorming. Model makers often publish recommended settings for their models, and these are a good starting point.
+
+</Callout>
+
+## Try it yourself
+
+Move the sliders and watch how the bars change. Then press "Sample" a few times. With **Greedy**, every draw is " pizza". With **Creative**, you will see a mix.
+
+<SamplingPlayground />
+
+Things to try:
+
+- Set temperature to 0. Only one bar remains: this is greedy decoding.
+- Keep temperature at 1 and move top-p from 1.0 down to 0.5. Watch tokens disappear from the bottom.
+- Set temperature to 2 and press "Sample 20". Count how often you get unusual foods.
+
+## Penalties: fighting repetition
+
+LLMs sometimes repeat themselves. **Penalties** lower the logits of tokens that already appeared in the text, before temperature and filters are applied. There are three common types:
+
+| Penalty | What it does to a token that already appeared | Typical range |
+| --- | --- | --- |
+| Presence penalty | Subtract a fixed amount once, if the token appeared at all | 0 to 2 |
+| Frequency penalty | Subtract an amount for **each** time the token appeared | 0 to 2 |
+| Repetition penalty | Divide a positive logit by a factor (or multiply a negative one) | 1.0 to 1.3 |
+
+<Callout type="example" title="Frequency penalty">
+
+Suppose " very" has a logit of 2.5, and it has already appeared 3 times. With a frequency penalty of 0.4, its new logit is $2.5 - 3 \times 0.4 = 1.3$. It is now much less likely, but not impossible.
+
+</Callout>
+
+<Callout type="warning">
+
+Strong penalties can hurt quality. In code, a variable name **should** repeat many times. In maths, the same numbers appear again and again. Use penalties gently, and usually not at all for code.
+
+</Callout>
+
+## Structured output: forcing a valid format
+
+Many applications need the model to answer in an exact format, like JSON that matches a schema. You can ask nicely in the prompt, but the model may still make a mistake. **Constrained decoding** makes mistakes impossible.
+
+The idea: before sampling each token, a **grammar engine** checks every candidate token. If a token would break the format, its logit is set to $-\infty$, so its chance becomes exactly 0. The model can only choose tokens that keep the output valid.
+
+<Figure n="5.4" title="Constrained decoding for JSON" caption="The schema says “age” must be an integer. Tokens like “forty” in quotes or “about” would break it, so the grammar engine blocks them before the draw. The model can only pick from valid tokens.">
+  <SmpConstrained />
+</Figure>
+
+Engines like vLLM and SGLang support this through libraries such as XGrammar, Outlines and llguidance. The main engineering challenge is speed: checking 128,256 tokens against a grammar at every step must take much less time than the forward pass. Good libraries precompute a lot of this work so the per-step check is fast.
+
+## How much does sampling cost?
+
+Compared with the forward pass, sampling is tiny.
+
+<Derivation title="Sampling cost vs forward pass, per token" result="Sampling is roughly ten thousand times less math than the forward pass.">
+
+1. The forward pass of Llama 3.1 8B costs about 15 GFLOPs per token (see [the forward pass chapter](/inference-fundamentals/transformer-forward-pass)):
+
+   $$
+   15 \times 10^{9} \text{ FLOPs}
+   $$
+
+2. Softmax over 128,256 logits needs a few operations per logit (subtract the max, exponent, add, divide). Say about 10:
+
+   $$
+   10 \times 128{,}256 \approx 1.3 \times 10^{6} \text{ operations}
+   $$
+
+3. Compare:
+
+   $$
+   \frac{15 \times 10^{9}}{1.3 \times 10^{6}} \approx 11{,}500
+   $$
+
+</Derivation>
+
+But "tiny in FLOPs" does not always mean "free in time". Top-p needs the tokens **sorted** by chance, and sorting is awkward on a GPU. With a batch of hundreds of sequences, each with its own settings, a slow sampler can take a noticeable part of each step. That is why modern engines use special GPU kernels for sampling (for example from FlashInfer) that avoid a full sort.
+
+<KeyNumbers
+  items={[
+    { value: '128,256', label: 'logits to choose from per token' },
+    { value: '≈ 2.7×', label: 'more likely for each +1 in the logit' },
+    { value: 'T = 0', label: 'means greedy (no randomness)' },
+    { value: '≈ 1/10,000', label: 'of the forward-pass math' },
+  ]}
+/>
+
+## Seeds and determinism
+
+If you send the same prompt twice with temperature 0.8, you get two different answers. That is expected: the dice is rolled with a **random number generator**, and it gives different numbers each time.
+
+Most engines let you set a **seed** per request. The random generator then produces the same sequence of "random" numbers each time. Same prompt + same settings + same seed should give the same answer.
+
+But even with temperature 0 (greedy) and no randomness at all, two runs **can** sometimes give different answers on a busy server. Why? See the deep dive.
+
+<DeepDive title="Why greedy decoding is not always deterministic">
+
+The surprise comes from how computers add decimal numbers. For real numbers, $(a + b) + c = a + (b + c)$. For floating-point numbers on a computer, this is **not always true**, because each step rounds the result.
+
+Example in FP32 (about 7 decimal digits of precision): let $a = 10^{8}$, $b = 1$, $c = -10^{8}$.
+
+$$
+(a + b) + c = (100{,}000{,}000 + 1) - 100{,}000{,}000 = 0
+$$
+
+because $100{,}000{,}001$ cannot be stored exactly in FP32 and is rounded to $100{,}000{,}000$. But if we add the same three numbers in a different order:
+
+$$
+(a + c) + b = (100{,}000{,}000 - 100{,}000{,}000) + 1 = 1
+$$
+
+Same numbers, different order, different answer. So **the order of additions changes the result**. In BF16, with only about 3 decimal digits, the effect is even bigger.
+
+Now, a GPU adds up thousands of numbers in every matrix multiplication. The order it uses depends on the **kernel** (the GPU program), and the best kernel often depends on the **batch size**. On a real server, your request is batched together with other users' requests, and the batch size changes from step to step. So your logits can change in the last digits depending on who else is using the server at that moment.
+
+Usually this does not matter. But if two tokens have almost the same logit (say 17.2031 and 17.2029), a tiny change can flip which one is the largest. Greedy then picks a different token, and from that point the whole answer goes a different way.
+
+Making inference fully repeatable requires **batch-invariant** kernels that always add in the same order, whatever the batch size. This is possible, but usually a bit slower. Some engines now offer it as an option for users who need exact reproducibility, for example for testing and research.
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="Logits are [2, 1, 0]. What are the softmax probabilities (roughly)?">
+
+e² ≈ 7.39, e¹ ≈ 2.72, e⁰ = 1, sum ≈ 11.11. So p ≈ [0.665, 0.245, 0.090].
+
+</Quiz>
+
+<Quiz n={2} q="What happens to the probabilities when you raise the temperature from 1 to 2?">
+
+The logits are divided by 2, so differences between them become smaller. The chances become more equal: the top token loses probability and unlikely tokens gain it. Text becomes more varied and less predictable.
+
+</Quiz>
+
+<Quiz n={3} q="The model is very sure: the top token has 97% and the next one has 2%. With top-p = 0.9, how many tokens are kept? With top-k = 40?">
+
+Top-p = 0.9 keeps only 1 token, because the first token alone already passes 90%. Top-k = 40 keeps 40 tokens, including 39 that together have only 3% of the chance. This is why top-p adapts better than top-k.
+
+</Quiz>
+
+<Quiz n={4} q="Why should you be careful with repetition penalties when generating code?">
+
+Code naturally repeats tokens: variable names, keywords, brackets. A penalty pushes these down, so the model may rename variables or produce broken syntax.
+
+</Quiz>
+
+<Quiz n={5} q="You run the same prompt with temperature 0 on a busy server and get two different answers. Is the server broken?">
+
+Probably not. Floating-point addition is not associative, and the GPU may add numbers in a different order when the batch size changes. Tiny differences in the logits can flip the top token when two tokens are almost tied, and the texts then diverge.
+
+</Quiz>
+
+<Takeaways>
+
+- The model outputs **logits**; **softmax** turns them into probabilities. Each +1 in a logit makes a token about **2.7× more likely**.
+- **Greedy** always takes the top token: repeatable, good for code and facts, but can be dull and repetitive.
+- **Temperature** divides the logits: below 1 sharpens, above 1 flattens. Temperature 0 means greedy.
+- **Top-k**, **top-p** and **min-p** remove unlikely tokens before the draw, then renormalise. Top-p and min-p adapt to how sure the model is.
+- **Penalties** fight repetition; **constrained decoding** guarantees a valid format by setting forbidden logits to −∞.
+- Sampling is about **1/10,000** of the forward-pass math, but needs good GPU kernels at large batch sizes. Exact repeatability needs a seed and, on busy servers, batch-invariant kernels.
+
+</Takeaways>
