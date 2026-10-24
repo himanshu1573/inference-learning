@@ -1,0 +1,30 @@
+---
+// Server-sent events: small chunks arrive one after another and the screen fills up.
+const chunks = [
+  { t: 'The', ms: 73 },
+  { t: ' capital', ms: 79 },
+  { t: ' of', ms: 85 },
+  { t: ' France', ms: 91 },
+  { t: ' is', ms: 97 },
+  { t: ' Paris', ms: 103 },
+  { t: '.', ms: 109 },
+];
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Streaming: each new token is sent as a small server-sent event and the answer appears word by word">
+  <text x="16" y="22" class="t" font-size="13" font-weight="700">Events on the wire</text>
+  <text x="450" y="22" class="t" font-size="13" font-weight="700">What the user sees</text>
+  {chunks.map((c, i) => (
+    <g>
+      <text x="16" y={52 + i * 30} class="t3 mono" font-size="10">{c.ms} ms</text>
+      <rect x="70" y={38 + i * 30} width="340" height="22" rx="5" class="box" />
+      <text x="80" y={53 + i * 30} class="t2 mono" font-size="10.5" xml:space="preserve">data: {'{'}"delta": {'{'}"content": "<tspan class="ta" font-weight="700">{c.t}</tspan>"{'}}'}</text>
+      <rect x="450" y={38 + i * 30} width="254" height="22" rx="5" class={i === chunks.length - 1 ? 'box-a' : 'box2'} />
+      <text x="460" y={53 + i * 30} class="t" font-size="11" xml:space="preserve">{chunks.slice(0, i + 1).map((x) => x.t).join('')}</text>
+    </g>
+  ))}
+  <rect x="70" y="250" width="340" height="22" rx="5" class="green" />
+  <text x="80" y="265" class="tg mono" font-size="10.5" font-weight="600">data: [DONE]</text>
+  <text x="16" y="265" class="t3 mono" font-size="10">end</text>
+  <text x="450" y="268" class="t3" font-size="10.5">Each line on the left is one small message.</text>
+  <text x="450" y="284" class="t3" font-size="10.5">The connection stays open until [DONE].</text>
+</svg>

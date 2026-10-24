@@ -1,0 +1,56 @@
+---
+// Map of Phase 2: where each chapter sits on the request path.
+const steps = [
+  { name: 'Tokenizer', ch: '2.2', x: 16 },
+  { name: 'Embeddings + positions', ch: '2.3', x: 126 },
+  { name: 'Transformer layers ×32', ch: '2.4', x: 266, wide: true },
+  { name: 'LM head + sampling', ch: '2.3 · 2.5', x: 496 },
+  { name: 'Detokenize', ch: '2.2', x: 616 },
+];
+const under = [
+  { x: 266, items: ['2.8 Sharing heads (GQA, MLA)', '2.9 FlashAttention', '2.10 Kernel fusion + CUDA Graphs', '2.11 Quantization', '2.13 Mixture of Experts'] },
+];
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Map of Phase 2 chapters placed on the request path">
+  <defs>
+    <marker id="pm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  {steps.map((s, i) => {
+    const w = s.wide ? 220 : 100;
+    return (
+      <g>
+        <rect x={s.x} y="30" width={w} height="62" rx="10" class={s.wide ? 'box-a' : 'box'} />
+        <text x={s.x + w / 2} y="56" class="t" font-size="11.5" font-weight="700" text-anchor="middle">{s.name.length > 16 && !s.wide ? s.name.split(' + ')[0] : s.name}</text>
+        {s.name.length > 16 && !s.wide && <text x={s.x + w / 2} y="70" class="t" font-size="11.5" font-weight="700" text-anchor="middle">+ {s.name.split(' + ')[1]}</text>}
+        <text x={s.x + w / 2} y="85" class="ta mono" font-size="10.5" font-weight="600" text-anchor="middle">ch. {s.ch}</text>
+        {i < steps.length - 1 && <path d={`M${s.x + w + 1} 61 H${steps[i + 1].x - 2}`} class="line-a" stroke-width="1.5" marker-end="url(#pm-arrow)" />}
+      </g>
+    );
+  })}
+  <!-- loop over the decode -->
+  <path d="M546 96 V122 H90 V98" class="line-a" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#pm-arrow)" />
+  <text x="318" y="116" class="ta" font-size="10.5" font-weight="600" text-anchor="middle">repeat for every new token (decode)</text>
+
+  {under.map((u) => (
+    <g>
+      <rect x={u.x} y="140" width="220" height="140" rx="10" class="box2" />
+      <text x={u.x + 12} y="160" class="t3 mono" font-size="9.5">MAKING THE LAYERS FAST</text>
+      {u.items.map((it, j) => <text x={u.x + 12} y={182 + j * 20} class="t2" font-size="11">{it}</text>)}
+      <path d={`M${u.x + 110} 124 V138`} class="line" stroke-dasharray="3 3" />
+    </g>
+  ))}
+  <rect x="16" y="140" width="232" height="140" rx="10" class="box2" />
+  <text x="28" y="160" class="t3 mono" font-size="9.5">THE TWO PHASES AND MEMORY</text>
+  <text x="28" y="182" class="t2" font-size="11">2.6 Prefill and decode</text>
+  <text x="28" y="202" class="t2" font-size="11">2.7 The KV cache</text>
+  <text x="28" y="230" class="t3" font-size="10.5">Why the first token and the</text>
+  <text x="28" y="245" class="t3" font-size="10.5">other tokens behave so</text>
+  <text x="28" y="260" class="t3" font-size="10.5">differently on a GPU.</text>
+  <rect x="504" y="140" width="200" height="140" rx="10" class="box2" />
+  <text x="516" y="160" class="t3 mono" font-size="9.5">SPEED AND MEASUREMENT</text>
+  <text x="516" y="182" class="t2" font-size="11">2.12 Speculative decoding</text>
+  <text x="516" y="202" class="t2" font-size="11">2.14 Metrics that matter</text>
+  <text x="516" y="230" class="t3" font-size="10.5">Writing several tokens per</text>
+  <text x="516" y="245" class="t3" font-size="10.5">step, and measuring TTFT,</text>
+  <text x="516" y="260" class="t3" font-size="10.5">TPOT and throughput.</text>
+</svg>

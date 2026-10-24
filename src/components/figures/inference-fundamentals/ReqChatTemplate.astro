@@ -1,0 +1,51 @@
+---
+// Chat messages (left) become one long string with special tokens (right).
+const lines = [
+  [{ s: '<|begin_of_text|>', k: 'sp' }],
+  [{ s: '<|start_header_id|>', k: 'sp' }, { s: 'system', k: 'role' }, { s: '<|end_header_id|>', k: 'sp' }],
+  [{ s: 'You are a helpful assistant.', k: 'txt' }, { s: '<|eot_id|>', k: 'sp' }],
+  [{ s: '<|start_header_id|>', k: 'sp' }, { s: 'user', k: 'role' }, { s: '<|end_header_id|>', k: 'sp' }],
+  [{ s: 'What is the capital of France?', k: 'txt' }, { s: '<|eot_id|>', k: 'sp' }],
+  [{ s: '<|start_header_id|>', k: 'sp' }, { s: 'assistant', k: 'role' }, { s: '<|end_header_id|>', k: 'sp' }],
+  [{ s: '▍ the model writes from here', k: 'cur' }],
+];
+const cw = 6.15; // approx width of one mono char at 10.5px
+---
+<svg viewBox="0 0 720 300" style="font-variant-ligatures: none" role="img" aria-label="A list of chat messages is turned into one string with special tokens for Llama 3.1">
+  <defs>
+    <marker id="ct-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <text x="16" y="22" class="t" font-size="13" font-weight="700">What your app sends</text>
+  <rect x="16" y="34" width="196" height="246" rx="10" class="box" />
+  {[
+    '"messages": [',
+    '  { "role": "system",',
+    '    "content": "You are a',
+    '     helpful assistant." },',
+    '  { "role": "user",',
+    '    "content": "What is the',
+    '     capital of France?" }',
+    ']',
+  ].map((l, i) => <text x="28" y={60 + i * 24} class="t2 mono" font-size="10.5" xml:space="preserve">{l}</text>)}
+
+  <path d="M218 157 H252" class="line-a" stroke-width="1.6" marker-end="url(#ct-arrow)" />
+  <text x="235" y="146" class="ta mono" font-size="9.5" text-anchor="middle">template</text>
+
+  <text x="262" y="22" class="t" font-size="13" font-weight="700">What the model actually reads</text>
+  <rect x="262" y="34" width="442" height="246" rx="10" class="box2" />
+  {lines.map((line, i) => {
+    let x = 274;
+    return line.map((part) => {
+      const w = part.s.length * cw + 8;
+      const g = (
+        <g>
+          {part.k === 'sp' && <rect x={x} y={47 + i * 32} width={w} height="20" rx="4" class="box-a" />}
+          {part.k === 'role' && <rect x={x} y={47 + i * 32} width={w} height="20" rx="4" class="violet" />}
+          <text x={x + 4} y={61 + i * 32} class={part.k === 'sp' ? 'ta mono' : part.k === 'role' ? 'tv mono' : part.k === 'cur' ? 'tg mono' : 't mono'} font-size="10.5" font-weight={part.k === 'txt' ? '400' : '600'}>{part.s}</text>
+        </g>
+      );
+      x += w + 3;
+      return g;
+    });
+  })}
+</svg>
