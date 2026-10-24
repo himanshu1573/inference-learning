@@ -1,0 +1,47 @@
+---
+// MHA vs GQA vs MQA: how 8 query heads connect to their key/value heads.
+const panels = [
+  { x: 14, title: 'MHA', sub: 'multi-head', kv: 8, note: '8 KV heads', size: '8 units per token' },
+  { x: 254, title: 'GQA', sub: 'grouped-query', kv: 2, note: '2 KV heads, groups of 4', size: '2 units per token' },
+  { x: 494, title: 'MQA', sub: 'multi-query', kv: 1, note: '1 KV head for all', size: '1 unit per token' },
+];
+const qw = 20, qg = 6, nq = 8;
+const span = nq * qw + (nq - 1) * qg; // 202
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Three diagrams. In multi-head attention each of 8 query heads has its own key-value head. In grouped-query attention groups of 4 query heads share one key-value head. In multi-query attention all 8 query heads share one key-value head.">
+  {panels.map((p) => {
+    const groupSize = nq / p.kv;
+    const kvW = p.kv === 8 ? qw : p.kv === 2 ? 60 : 90;
+    const kvCenters = Array.from({ length: p.kv }, (_, k) => {
+      const first = k * groupSize, last = first + groupSize - 1;
+      const c1 = p.x + 6 + first * (qw + qg) + qw / 2;
+      const c2 = p.x + 6 + last * (qw + qg) + qw / 2;
+      return (c1 + c2) / 2;
+    });
+    return (
+      <g>
+        <rect x={p.x} y="10" width="212" height="280" rx="12" class="box" />
+        <text x={p.x + 106} y="36" class="t" font-size="15" font-weight="700" text-anchor="middle">{p.title}</text>
+        <text x={p.x + 106} y="53" class="t3" font-size="11" text-anchor="middle">{p.sub}</text>
+        <text x={p.x + 12} y="80" class="t3 mono" font-size="10">QUERY HEADS</text>
+        {Array.from({ length: nq }, (_, i) => (
+          <rect x={p.x + 6 + i * (qw + qg)} y="88" width={qw} height="26" rx="4" class="box-a" />
+        ))}
+        {Array.from({ length: nq }, (_, i) => {
+          const qx = p.x + 6 + i * (qw + qg) + qw / 2;
+          const kc = kvCenters[Math.floor(i / groupSize)];
+          return <path d={`M${qx} 114 L${kc} 180`} class="line-t" stroke-width="1.1" />;
+        })}
+        {kvCenters.map((c) => (
+          <g>
+            <rect x={c - kvW / 2} y="180" width={kvW} height="18" rx="4" class="green" />
+            <rect x={c - kvW / 2} y="200" width={kvW} height="18" rx="4" class="amber" />
+          </g>
+        ))}
+        <text x={p.x + 12} y="238" class="t3 mono" font-size="10">K (green) · V (orange)</text>
+        <text x={p.x + 106} y="260" class="t" font-size="12" font-weight="600" text-anchor="middle">{p.note}</text>
+        <text x={p.x + 106} y="278" class="ta mono" font-size="11" text-anchor="middle">cache: {p.size}</text>
+      </g>
+    );
+  })}
+</svg>

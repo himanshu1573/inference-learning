@@ -1,0 +1,27 @@
+---
+// KV cache per token (BF16) for different attention designs.
+const rows = [
+  { name: 'Llama 2 7B', kind: 'MHA, 32 KV heads', kib: 512, cls: 'red', tc: 'tr' },
+  { name: 'Llama 3.1 70B', kind: 'GQA, 8 KV heads, 80 layers', kib: 320, cls: 'amber', tc: 'tam' },
+  { name: 'Llama 3.1 8B', kind: 'GQA, 8 KV heads', kib: 128, cls: 'box-a', tc: 'ta' },
+  { name: 'DeepSeek-V3 671B', kind: 'MLA, 576-number latent', kib: 68.6, cls: 'violet', tc: 'tv' },
+  { name: '8B-size, 1 KV head', kind: 'MQA (for comparison)', kib: 16, cls: 'green', tc: 'tg' },
+];
+const x0 = 210, scale = 0.86;
+---
+<svg viewBox="0 0 720 290" role="img" aria-label="Bar chart of KV cache per token: Llama 2 7B 512 KiB, Llama 3.1 70B 320 KiB, Llama 3.1 8B 128 KiB, DeepSeek-V3 about 69 KiB, a multi-query 8B-size model 16 KiB">
+  <text x="20" y="24" class="t" font-size="13" font-weight="700">KV cache per token, BF16</text>
+  {rows.map((r, i) => {
+    const y = 46 + i * 46;
+    const w = Math.max(4, r.kib * scale);
+    return (
+      <g>
+        <text x={x0 - 12} y={y + 13} class="t" font-size="12" font-weight="600" text-anchor="end">{r.name}</text>
+        <text x={x0 - 12} y={y + 28} class="t3" font-size="10.5" text-anchor="end">{r.kind}</text>
+        <rect x={x0} y={y} width={w} height="26" rx="4" class={r.cls} />
+        <text x={x0 + w + 8} y={y + 18} class={`${r.tc} mono`} font-size="12" font-weight="700">{r.kib} KiB</text>
+      </g>
+    );
+  })}
+  <text x="20" y="282" class="t3" font-size="11">DeepSeek-V3 is a much bigger model than Llama 3.1 70B, but it stores about 4.7 × less per token.</text>
+</svg>

@@ -1,0 +1,26 @@
+---
+// Attention masks: full causal vs sliding window (W = 4), 10 tokens.
+const n = 10, c = 19, W = 4;
+const inWindow = (i: number, j: number, win: number) => j <= i && i - j < win;
+const panels = [
+  { x: 40, title: 'Full causal attention', sub: 'token i looks at tokens 1 … i', win: n },
+  { x: 400, title: 'Sliding window, W = 4', sub: 'token i looks at its last 4 tokens', win: W },
+];
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Two attention masks for 10 tokens. Full causal attention fills the lower triangle. Sliding-window attention with a window of 4 fills only a band of 4 cells per row.">
+  {panels.map((p) => (
+    <g>
+      <text x={p.x} y="22" class="t" font-size="13" font-weight="700">{p.title}</text>
+      <text x={p.x} y="40" class="t3" font-size="11">{p.sub}</text>
+      <text x={p.x + 30 + (n * c) / 2} y="60" class="t3 mono" font-size="9.5" text-anchor="middle">keys (earlier tokens) →</text>
+      <text x={p.x + 12} y={70 + (n * c) / 2} class="t3 mono" font-size="9.5" text-anchor="middle" transform={`rotate(-90 ${p.x + 12} ${70 + (n * c) / 2})`}>queries ↓</text>
+      {Array.from({ length: n }, (_, i) =>
+        Array.from({ length: n }, (_, j) => {
+          const on = inWindow(i, j, p.win);
+          return <rect x={p.x + 30 + j * c} y={68 + i * c} width={c - 2} height={c - 2} rx="2" class={on ? 'box-a' : 'box'} style={on ? '' : 'opacity:0.4'} />;
+        }),
+      )}
+      <text x={p.x} y="282" class="t2" font-size="11.5">{p.win === n ? 'cache keeps all tokens: grows forever' : 'cache keeps only the last 4 tokens'}</text>
+    </g>
+  ))}
+</svg>
