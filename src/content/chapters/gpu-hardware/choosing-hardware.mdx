@@ -1,0 +1,538 @@
+---
+title: 'Choosing Hardware: Will My Model Fit?'
+description: 'Put all of Phase 1 together: calculate the memory for weights and KV cache, check the speed, compare GPUs, and choose the right hardware for a real model.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import FitCalculator from '../../../components/widgets/FitCalculator.astro';
+import MemoryBudgetH100 from '../../../components/figures/gpu-hardware/MemoryBudgetH100.astro';
+import KvPerTokenChain from '../../../components/figures/gpu-hardware/KvPerTokenChain.astro';
+import KvUsersGrid from '../../../components/figures/gpu-hardware/KvUsersGrid.astro';
+import FitMatrix from '../../../components/figures/gpu-hardware/FitMatrix.astro';
+import HardwareChecklist from '../../../components/figures/gpu-hardware/HardwareChecklist.astro';
+
+Your team wants to run Llama 3.1 70B for its users. Your manager asks a simple question: **"Which GPUs do we need, and how many?"** This chapter teaches you to answer it with a pencil and a few multiplications. It brings together everything from Phase 1: memory size, memory bandwidth, number formats and multi-GPU servers.
+
+<NewWords
+  words={[
+    { word: 'Memory budget', meaning: 'A plan that splits the GPU memory into parts: weights, KV cache, overhead and a reserve.' },
+    { word: 'KV cache', meaning: 'Saved data (keys and values) for every token the model has already seen, so it does not need to compute them again.' },
+    { word: 'Overhead', meaning: 'Memory used by the software itself: the CUDA context, temporary buffers and other helpers.' },
+    { word: 'Context length', meaning: 'How many tokens one conversation holds: the prompt plus the answer so far.' },
+    { word: 'Concurrent sequences', meaning: 'How many conversations the GPU works on at the same time.' },
+    { word: 'Tensor parallelism (TP)', meaning: 'Splitting each layer of the model across several GPUs, so they work on every token together.' },
+    { word: 'Utilisation', meaning: 'The share of GPU memory you allow the engine to use, for example 90%.' },
+    { word: 'Fragmentation', meaning: 'Wasted memory: small free gaps that are too small or in the wrong place to be useful.' },
+  ]}
+/>
+
+## The simple picture: a suitcase
+
+Think of GPU memory as a **suitcase** for a trip. Some things *must* go in: your passport and your clothes. These are the **model weights**. You cannot travel without them. Then you need space for things you collect during the trip, like gifts. That is the **KV cache**: it grows while users talk to the model. The suitcase itself has a frame and pockets that take some space (the **overhead**). And you never pack it 100% full, or the zip breaks (the **reserve**).
+
+So the question "Will my model fit?" is really four questions:
+
+1. How big are the **weights**?
+2. How much **KV cache** do my users need?
+3. How much does the **software** take for itself?
+4. How much should I keep **free** to be safe?
+
+If weights + KV cache + overhead + reserve is smaller than the GPU memory, the model fits. Let us calculate each part with real numbers.
+
+## Part 1: the weights
+
+You already know this from chapter 1.1. The weights need:
+
+$$
+\text{weight memory} = P \times \text{bytes per parameter}
+$$
+
+Here $P$ is the number of parameters. In the chapter on number formats you saw the bytes for each format: BF16 = 2 bytes, FP8 = 1 byte, INT4 = half a byte.
+
+| Model | Parameters | BF16 (2 B) | FP8 (1 B) | INT4 (0.5 B) |
+| --- | --- | --- | --- | --- |
+| Llama 3.1 8B | 8.03 B | <span class="num">16.1 GB</span> | <span class="num">8.0 GB</span> | <span class="num">4.0 GB</span> |
+| Llama 3.1 70B | 70.6 B | <span class="num">141 GB</span> | <span class="num">70.6 GB</span> | <span class="num">35.3 GB</span> |
+| Llama 3.1 405B | 405.9 B | <span class="num">812 GB</span> | <span class="num">406 GB</span> | <span class="num">203 GB</span> |
+
+<Callout type="note">
+
+Real INT4 files are a little bigger than "parameters × 0.5 bytes". They also store small **scale** numbers that say how to turn the 4-bit values back into real numbers. Some layers (like the embedding table) are often kept in BF16 too. Add about 5–10% to the INT4 numbers for a realistic estimate.
+
+</Callout>
+
+## Part 2: the KV cache
+
+### What is the KV cache, in one paragraph?
+
+When the model reads a token, every layer computes two vectors for it, called the **key (K)** and the **value (V)**. Later tokens need to look back at the keys and values of all earlier tokens. Computing them again for every new token would be a huge waste. So the engine **saves them** in GPU memory. This saved data is the **KV cache**. Phase 2 explains why the model needs K and V. Here we only need to know **how big it is**.
+
+### How big is it per token?
+
+For every token, and for every layer, the model saves one K vector and one V vector. Each vector is split into **heads**. Modern models like Llama 3.1 use **grouped-query attention (GQA)**: many query heads share a small number of **KV heads**. Llama 3.1 8B has 32 query heads but only **8 KV heads**, and each head has **128** numbers.
+
+<Figure n="8.1" title="KV cache for one token" caption="Each token stores a key and a value (×2) in every layer (×32), for each KV head (×8), with 128 numbers per head (×128), at 2 bytes each in BF16 (×2). The result is 131,072 bytes, which is exactly 128 KiB.">
+  <KvPerTokenChain />
+</Figure>
+
+<Derivation title="KV cache per token for Llama 3.1 8B" result="131,072 bytes = 128 KiB for every token, in BF16.">
+
+1. Write the general formula. The 2 at the front is for K and V.
+
+   $$
+   \text{KV bytes per token} = 2 \times L \times H_{kv} \times d_{head} \times b
+   $$
+
+   Here $L$ = number of layers, $H_{kv}$ = number of KV heads, $d_{head}$ = numbers per head, $b$ = bytes per number.
+
+2. Put in the numbers for Llama 3.1 8B: 32 layers, 8 KV heads, 128 numbers per head, BF16 (2 bytes).
+
+   $$
+   2 \times 32 \times 8 \times 128 \times 2
+   $$
+
+3. Multiply step by step: $2 \times 32 = 64$, then $64 \times 8 = 512$, then $512 \times 128 = 65{,}536$, then $65{,}536 \times 2$.
+
+   $$
+   = 131{,}072 \text{ bytes}
+   $$
+
+4. Turn it into KiB (1 KiB = 1,024 bytes).
+
+   $$
+   131{,}072 \div 1{,}024 = 128 \text{ KiB}
+   $$
+
+</Derivation>
+
+Now do the same for the bigger models. They all use 8 KV heads and 128 numbers per head. Only the number of layers changes:
+
+| Model | Layers | KV heads | Head size | KV per token (BF16) | KV for 8K tokens |
+| --- | --- | --- | --- | --- | --- |
+| Llama 3.1 8B | 32 | 8 | 128 | <span class="num">128 KiB</span> | <span class="num">1.07 GB</span> |
+| Llama 3.1 70B | 80 | 8 | 128 | <span class="num">320 KiB</span> | <span class="num">2.68 GB</span> |
+| Llama 3.1 405B | 126 | 8 | 128 | <span class="num">504 KiB</span> | <span class="num">4.23 GB</span> |
+
+For 70B: $2 \times 80 \times 8 \times 128 \times 2 = 327{,}680$ bytes $= 320$ KiB. For 405B: $2 \times 126 \times 8 \times 128 \times 2 = 516{,}096$ bytes $= 504$ KiB.
+
+### KV cache for all users
+
+One token is small. But the KV cache grows with **every token of every conversation**:
+
+$$
+\text{KV memory} = \text{sequences} \times \text{tokens per sequence} \times \text{KV bytes per token}
+$$
+
+<Callout type="example" title="32 users, 8K tokens each, Llama 3.1 8B">
+
+$32 \times 8{,}192 \times 131{,}072 \text{ bytes} = 34{,}359{,}738{,}368 \text{ bytes} \approx 34.4 \text{ GB}$.
+
+That is **more than twice the size of the weights** (16.1 GB)! For many real workloads, the KV cache, not the weights, decides how much memory you need.
+
+</Callout>
+
+<Callout type="idea">
+
+The weights are a **fixed** cost: they are the same for 1 user or 1,000 users. The KV cache is a **variable** cost: it grows with the number of users and with the length of each conversation. This is why "Will it fit?" always needs two answers: *Will the weights fit?* and *How many users can I serve after that?*
+
+</Callout>
+
+## Part 3: overhead and reserve
+
+The weights and the KV cache are not the only things in GPU memory. The software also needs space:
+
+- **CUDA context.** When a program starts using a GPU, the driver sets up its own data structures. This takes a few hundred MB.
+- **Activations and temporary buffers.** While a layer runs, it creates temporary results (activations). For a big batch of prompt tokens, these can take a few GB at the peak.
+- **CUDA graphs and libraries.** Engines like vLLM record **CUDA graphs** (saved sequences of GPU work, to launch them faster) and load libraries like NCCL for multi-GPU communication. Each takes some memory.
+
+In this book we use a simple rule of thumb: **about 4 GB of overhead per GPU.** The real number depends on the engine, the model and the settings, but 4 GB is a safe estimate for planning.
+
+There is also a **reserve**. Engines usually do not take all the memory. In vLLM, the setting `gpu_memory_utilization` says how much of the GPU memory the engine may use. The default is **0.9**, which means 90%. The other 10% stays free as a safety margin.
+
+<Callout type="real" title="How vLLM fills the memory">
+
+At startup, vLLM loads the weights, then runs a test forward pass with a large batch to **measure** the peak memory for activations. Whatever is left, up to `gpu_memory_utilization × total memory`, becomes the **KV cache pool**. It then prints how many tokens fit in that pool. So vLLM does this same calculation for you, but it measures the overhead instead of guessing it.
+
+</Callout>
+
+## Putting it together: Llama 3.1 8B on one H100
+
+Now we have all four parts. Let us build the full memory budget for a common setup.
+
+<Derivation title="Memory budget: Llama 3.1 8B (BF16) on one H100 80 GB" result="About 52 GB for the KV cache, enough for about 396,000 tokens, or 48 users with 8K tokens each.">
+
+1. Usable memory with 90% utilisation.
+
+   $$
+   80 \text{ GB} \times 0.9 = 72 \text{ GB}
+   $$
+
+2. Take away the weights (16.06 GB) and the overhead (about 4 GB).
+
+   $$
+   72 - 16.06 - 4 = 51.94 \text{ GB}
+   $$
+
+3. This is the KV cache pool. Divide by the KV size of one token.
+
+   $$
+   \frac{51.94 \times 10^{9}}{131{,}072} \approx 396{,}000 \text{ tokens}
+   $$
+
+4. How many users with 8K (8,192) tokens each?
+
+   $$
+   \frac{396{,}000}{8{,}192} \approx 48 \text{ users}
+   $$
+
+</Derivation>
+
+<Figure n="8.2" title="The memory budget of one H100" caption="With gpu_memory_utilization = 0.9, the engine may use 72 GB. The weights take 16.1 GB and overhead about 4 GB. Everything else, about 51.9 GB, becomes the KV cache pool that all users share. The last 8 GB stay free as a reserve.">
+  <MemoryBudgetH100 />
+</Figure>
+
+<Figure n="8.3" title="How many users fit?" caption="Each user with a full 8K-token conversation needs about 1.07 GB of KV cache. About 48 of them fit in the pool at the same time. If the conversations are 32K tokens long, only about 12 fit.">
+  <KvUsersGrid />
+</Figure>
+
+Look at the result: the weights use only **20%** of the GPU. The biggest part, by far, is the KV cache. This is very common for small models on big GPUs.
+
+## Part 4: is it fast enough?
+
+Fitting is not enough. The model must also be **fast**. In chapter 1.1 and in the roofline chapter you learned the most important speed rule for decode:
+
+<Callout type="idea">
+
+In decode, each step must read **all the weights** from memory. So for one sequence, the best possible speed is:
+
+$$
+\text{tokens per second} \approx \frac{\text{memory bandwidth}}{\text{weight bytes}}
+$$
+
+</Callout>
+
+With **tensor parallelism** over $N$ GPUs, each GPU holds and reads only $1/N$ of the weights, and all GPUs read at the same time. So in the ideal case the bandwidths add up:
+
+$$
+\text{tokens per second} \approx \frac{N \times \text{bandwidth per GPU}}{\text{weight bytes}}
+$$
+
+This is an **upper bound**. Real speed is lower, because of KV cache reads, communication between GPUs and other overhead. But it is a very good first check.
+
+<Derivation title="Best-case decode speed: Llama 3.1 8B on an L40S vs an H100" result="The L40S fits the model but is about 4× slower per user: ≈ 54 vs ≈ 209 tokens per second.">
+
+1. L40S: 864 GB/s of bandwidth, 16.06 GB of weights.
+
+   $$
+   \frac{864}{16.06} \approx 54 \text{ tokens per second}
+   $$
+
+2. H100: 3,350 GB/s of bandwidth.
+
+   $$
+   \frac{3{,}350}{16.06} \approx 209 \text{ tokens per second}
+   $$
+
+3. Compare. People read at about 5–10 tokens per second, so both are fast enough for one chat user. But the H100 leaves much more room for many users and for long answers.
+
+   $$
+   \frac{209}{54} \approx 3.9\times
+   $$
+
+</Derivation>
+
+### And with many users?
+
+In decode, one step reads the weights **once** and uses them for **every sequence in the batch**. So while decode is memory-bound, 32 sequences take about the same time per step as 1 sequence. The total throughput is roughly:
+
+$$
+\text{total tokens per second} \approx B \times \frac{\text{bandwidth}}{\text{weight bytes}}
+$$
+
+For Llama 3.1 8B on an H100 with $B = 32$: $32 \times 209 \approx 6{,}700$ tokens per second. This is again a best case. In reality the KV cache must also be read for every sequence, and that grows with $B$ and with the context length. This is why the KV cache matters for **speed** as well as for memory.
+
+## Worked examples
+
+Now let us size three real deployments, from small to very big. We always use 90% utilisation and 4 GB of overhead per GPU.
+
+### Example A: Llama 3.1 8B on an L40S (48 GB)
+
+<Derivation title="Llama 3.1 8B (BF16) on one L40S" result="It fits, with about 23 GB for the KV cache: about 176,500 tokens or 21 users at 8K.">
+
+1. Usable memory.
+
+   $$
+   48 \times 0.9 = 43.2 \text{ GB}
+   $$
+
+2. Left for the KV cache.
+
+   $$
+   43.2 - 16.06 - 4 = 23.14 \text{ GB}
+   $$
+
+3. Tokens and users.
+
+   $$
+   \frac{23.14 \times 10^{9}}{131{,}072} \approx 176{,}500 \text{ tokens}
+   $$
+
+   $$
+   \frac{176{,}500}{8{,}192} \approx 21 \text{ users}
+   $$
+
+</Derivation>
+
+So the L40S is a fine choice for a small model with a moderate number of users. The H100 gives about **2.2× more users** (48 vs 21) and about **3.9× more speed** per user.
+
+### Example B: Llama 3.1 70B
+
+The weights are 141 GB in BF16. Let us try the options one by one.
+
+<Derivation title="Llama 3.1 70B: which setup works?" result="BF16 needs 4 × H100 in practice. In FP8, one H200 works, with room for about 19 users at 8K.">
+
+1. **One H100 (80 GB), BF16.** The weights alone (141 GB) are bigger than the whole GPU. ✗
+
+2. **Two H100 (160 GB), BF16.** Usable: $2 \times 80 \times 0.9 = 144$ GB. Minus weights and overhead: $144 - 141.2 - 8 = -5.2$ GB. **Negative**, so there is no room for any KV cache. ✗ On paper "141 is less than 160", but in practice it does not work.
+
+3. **Four H100 (320 GB), BF16, TP = 4.** Usable: $4 \times 80 \times 0.9 = 288$ GB.
+
+   $$
+   288 - 141.2 - 16 = 130.8 \text{ GB for KV}
+   $$
+
+   $$
+   \frac{130.8 \times 10^{9}}{327{,}680} \approx 399{,}000 \text{ tokens}
+   $$
+
+   That is about 48 users at 8K (each needs 2.68 GB). ✓
+
+4. **One H100, FP8 (70.6 GB).** Usable: 72 GB. $72 - 70.6 - 4 = -2.6$ GB. ✗ Very close, but no room for the KV cache.
+
+5. **One H200 (141 GB), FP8.** Usable: $141 \times 0.9 = 126.9$ GB.
+
+   $$
+   126.9 - 70.6 - 4 = 52.3 \text{ GB for KV}
+   $$
+
+   $$
+   \frac{52.3}{2.68} \approx 19 \text{ users at 8K}
+   $$
+
+   ✓ And if the KV cache is also stored in FP8 (half the size), about **39 users** fit.
+
+</Derivation>
+
+<Callout type="warning" title="'It fits' is not the same as 'it is useful'">
+
+A model that *just* fits has no room for the KV cache, so it can serve almost nobody. Always check the **room left after the weights**, not only the weights. A good rule: leave **at least 20–30% of the usable memory** for the KV cache.
+
+</Callout>
+
+### Example C: Llama 3.1 405B
+
+In FP8, the weights are about **406 GB**. No single GPU has that much memory, so we need a full server with 8 GPUs connected by NVLink (see the chapter on connecting GPUs).
+
+<Derivation title="Llama 3.1 405B (FP8) on 8 × H100 vs 8 × H200" result="8 × H100 fits with about 32 users at 8K. 8 × H200 fits about 136 users at 8K.">
+
+1. **8 × H100 (640 GB).** Usable: $640 \times 0.9 = 576$ GB. Overhead: $8 \times 4 = 32$ GB.
+
+   $$
+   576 - 405.9 - 32 = 138.1 \text{ GB}
+   $$
+
+   $$
+   \frac{138.1}{4.23} \approx 32 \text{ users at 8K}
+   $$
+
+2. **8 × H200 (1,128 GB).** Usable: $1{,}128 \times 0.9 = 1{,}015.2$ GB.
+
+   $$
+   1{,}015.2 - 405.9 - 32 = 577.3 \text{ GB}
+   $$
+
+   $$
+   \frac{577.3}{4.23} \approx 136 \text{ users at 8K}
+   $$
+
+3. **Speed check** (best case, one sequence). The 8 GPUs read their parts at the same time.
+
+   $$
+   \text{H100: } \frac{8 \times 3{,}350}{405.9} \approx 66 \text{ tok/s}
+   $$
+
+   $$
+   \text{H200: } \frac{8 \times 4{,}800}{405.9} \approx 95 \text{ tok/s}
+   $$
+
+</Derivation>
+
+In BF16, the 405B model needs about 812 GB. That does **not** fit on 8 × H100 (only 576 GB usable), but it does fit on 8 × H200, with about 171 GB left for the KV cache.
+
+<Figure n="8.4" title="Which model fits on which hardware?" caption="Each cell shows how many GB are left for the KV cache after the weights and overhead, using 90% utilisation and 4 GB of overhead per GPU. A cross means the weights and overhead alone are already too big. Notice how FP8 moves a model one column to the left: it needs half the hardware.">
+  <FitMatrix />
+</Figure>
+
+## Try it yourself
+
+Use the calculator below to check the examples above, or your own model. Start with **Llama 3.1 70B** and **H100**, then change the format to FP8, or the number of GPUs to 4. Watch the KV cache part of the bar.
+
+<FitCalculator />
+
+<Callout type="example" title="Things to try">
+
+- Llama 3.1 8B on one H100: move the context length from 8K to 128K. How many sequences fit now?
+- Llama 3.1 70B, FP8, one H200: switch the KV cache from BF16 to FP8. How many more users fit?
+- Llama 3.1 405B, FP8: what is the smallest number of H100s that works? And of MI300X?
+
+</Callout>
+
+## Comparing GPUs
+
+Here are the most common data-centre GPUs for inference today. The numbers are **dense** (without the "sparsity" trick that vendors sometimes use to show 2× bigger numbers), taken from public datasheets.
+
+| GPU | Memory | Bandwidth | BF16 TFLOPS | FP8 TFLOPS | GPU-to-GPU link |
+| --- | --- | --- | --- | --- | --- |
+| NVIDIA L40S | 48 GB GDDR6 | <span class="num">0.86 TB/s</span> | <span class="num">362</span> | <span class="num">733</span> | PCIe Gen4 only |
+| NVIDIA A100 80GB SXM | 80 GB HBM2e | <span class="num">2.04 TB/s</span> | <span class="num">312</span> | no FP8 | NVLink 3 · 600 GB/s |
+| NVIDIA H100 SXM | 80 GB HBM3 | <span class="num">3.35 TB/s</span> | <span class="num">989</span> | <span class="num">1,979</span> | NVLink 4 · 900 GB/s |
+| NVIDIA H200 SXM | 141 GB HBM3e | <span class="num">4.8 TB/s</span> | <span class="num">989</span> | <span class="num">1,979</span> | NVLink 4 · 900 GB/s |
+| NVIDIA B200 | 180 GB HBM3e | <span class="num">8 TB/s</span> | <span class="num">~2,250</span> | <span class="num">~4,500</span> | NVLink 5 · 1.8 TB/s |
+| AMD MI300X | 192 GB HBM3 | <span class="num">5.3 TB/s</span> | <span class="num">1,307</span> | <span class="num">2,615</span> | Infinity Fabric · 896 GB/s |
+
+How to read this table for inference:
+
+- **Memory** decides what **fits** and how many users you can serve.
+- **Bandwidth** decides the **decode speed** (tokens per second per user).
+- **TFLOPS** decides the **prefill speed** (how fast long prompts are read) and the speed with very large batches.
+- **GPU-to-GPU link** decides how well the GPUs work together when you split a model with tensor parallelism.
+
+<Callout type="note">
+
+The H100 and H200 have the **same compute** (989 TFLOPS in BF16). The H200 only has more and faster memory. For LLM decode, which is limited by memory, the H200 is often much faster in practice. This is a great example of why bandwidth matters so much for inference. B200 memory is listed as 180 GB per GPU in NVIDIA's HGX/DGX B200 systems; some sources say 192 GB. Always check the datasheet of the exact system you buy or rent.
+
+</Callout>
+
+## The cost of a token
+
+Hardware is rented by the hour, but users care about **tokens**. So we convert:
+
+$$
+\text{cost per 1M tokens} = \frac{\text{price per hour}}{\text{tokens per hour}} \times 10^{6}
+$$
+
+<Derivation title="From price per hour to price per million tokens" result="With these example numbers, about $0.35 per million output tokens. Use your own price and your own measured throughput.">
+
+1. Take a price per GPU per hour. **This is a made-up example price, not a real quote.** Prices change a lot between clouds and over time.
+
+   $$
+   \text{price} = \$2.50 \text{ per hour (example)}
+   $$
+
+2. Take the total throughput you **measured** under real load. Here we assume 2,000 output tokens per second for Llama 3.1 8B on one H100 with many users (also an example; the best case above was 6,700).
+
+   $$
+   2{,}000 \times 3{,}600 = 7{,}200{,}000 \text{ tokens per hour}
+   $$
+
+3. Divide and scale to one million tokens.
+
+   $$
+   \frac{2.50}{7{,}200{,}000} \times 10^{6} \approx \$0.35
+   $$
+
+</Derivation>
+
+This formula shows two ways to make tokens cheaper: a **lower price per hour**, or **more tokens per hour**. A cheaper GPU is not always cheaper per token. If GPU B costs **half** as much per hour as GPU A, but makes only **one third** of the tokens, then GPU B costs **1.5×** more per token. Phase 5 has a full chapter on cost.
+
+## A checklist for choosing hardware
+
+When you choose hardware, ask these five questions **in this order**:
+
+<Figure n="8.5" title="Five questions, in order" caption="Start with memory, because a model that does not fit cannot run at all. Then check speed, number of users, cost and software support. If any answer is 'no', change the format, the number of GPUs or the GPU type, and start again.">
+  <HardwareChecklist />
+</Figure>
+
+1. **Does it fit?** Weights + overhead + a healthy KV cache pool must fit in the usable memory.
+2. **Is it fast enough?** Check bandwidth ÷ weight bytes against your speed target (TPOT).
+3. **Enough users and context?** KV room ÷ KV per user gives the number of users at your context length.
+4. **What does it cost?** Price per hour ÷ tokens per hour.
+5. **Does the software support it?** Check that your engine (vLLM, SGLang, TensorRT-LLM) supports the GPU, the number format (for example FP8 needs an H100, H200, B200, MI300X or L40S, not an A100) and the model.
+
+<KeyNumbers
+  items={[
+    { value: '128 KiB', label: 'KV per token, Llama 3.1 8B (BF16)' },
+    { value: '320 KiB', label: 'KV per token, Llama 3.1 70B' },
+    { value: '~48 users', label: '8B on one H100, 8K context each' },
+    { value: '4 × H100', label: 'practical minimum for 70B in BF16' },
+  ]}
+/>
+
+<DeepDive title="Why can't we use 100% of the memory? A first look at fragmentation">
+
+You might ask: why waste 10% of an expensive GPU? There are three good reasons.
+
+**1. Memory use is not perfectly predictable.** The peak memory for activations depends on the batch. A sudden long prompt can need more temporary memory than the test run. If the GPU runs out of memory, the engine can crash and **all** users lose their requests. A small reserve is cheap insurance.
+
+**2. Other programs and libraries need memory too.** The PyTorch memory allocator keeps some freed memory in a cache to reuse it quickly. Libraries like NCCL allocate buffers for communication. Monitoring tools may also use a little memory.
+
+**3. Fragmentation.** This is the most interesting one. Imagine an older engine that gives each new request one big piece of memory for the **maximum** possible length, say 8,192 tokens, because it does not know how long the answer will be. Most answers are much shorter. If a request uses only 500 tokens, then
+
+$$
+\frac{8{,}192 - 500}{8{,}192} \approx 94\%
+$$
+
+of its piece is reserved but never used. Nobody else can use it either. The researchers who built vLLM measured that older systems wasted **60–80%** of their KV cache memory in this way.
+
+Their solution, **PagedAttention**, works like the memory system of an operating system. It cuts the KV cache into small **blocks** (for example 16 tokens each) and gives a request a new block only when it needs one. Blocks do not need to be next to each other in memory. Waste drops to less than one block per request, which the vLLM paper reports as **under 4%**. This is why vLLM can fit many more users in the same memory. You will study PagedAttention in detail in Phase 3.
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="What is the KV cache size per token for a model with 40 layers, 8 KV heads and a head size of 128, in BF16?">
+
+$2 \times 40 \times 8 \times 128 \times 2 = 163{,}840$ bytes $= 160$ KiB per token.
+
+</Quiz>
+
+<Quiz n={2} q="Llama 3.1 70B in BF16 is 141 GB, and two H100s have 160 GB. Why is this setup not practical?">
+
+With 90% utilisation, only 144 GB is usable. After the weights (141 GB) and about 8 GB of overhead, there is **no room left for the KV cache**, so the engine cannot serve users. In practice you need 4 × H100, or FP8 weights on a GPU with more memory.
+
+</Quiz>
+
+<Quiz n={3} q="The H100 and H200 have the same TFLOPS. Why is the H200 often faster for LLM decode?">
+
+Decode is limited by memory bandwidth, not by compute. The H200 has 4.8 TB/s instead of 3.35 TB/s (about 1.4× more), so it reads the weights faster for every token. Its bigger memory (141 GB) also leaves more room for the KV cache, so it can serve more users at once.
+
+</Quiz>
+
+<Quiz n={4} q="Your Llama 3.1 8B service on one H100 serves 48 users at 8K context. Users now want 32K context. How many users fit?">
+
+Each user now needs 4× more KV cache: $32{,}768 \times 131{,}072 \approx 4.3$ GB. The pool is about 51.9 GB, so $51.9 \div 4.3 \approx 12$ users. Longer context means fewer users on the same hardware.
+
+</Quiz>
+
+<Quiz n={5} q="GPU X costs $4 per hour and makes 3,000 tokens per second. GPU Y costs $2 per hour and makes 1,000 tokens per second. Which is cheaper per token?">
+
+GPU X: $4 \div (3{,}000 \times 3{,}600) \times 10^6 \approx 0.37$ dollars per million tokens. GPU Y: $2 \div (1{,}000 \times 3{,}600) \times 10^6 \approx 0.56$ dollars per million tokens. **GPU X is cheaper per token**, even though it costs twice as much per hour.
+
+</Quiz>
+
+<Takeaways>
+
+- GPU memory holds four things: **weights** (fixed), **KV cache** (grows with users and context), **overhead** (about 4 GB per GPU) and a **reserve** (10% with the default setting).
+- **KV bytes per token = 2 × layers × KV heads × head size × bytes.** Llama 3.1 8B: 128 KiB. 70B: 320 KiB. 405B: 504 KiB.
+- A model that only *just* fits is useless. Always check the **room left for the KV cache** and turn it into a number of users.
+- Best-case decode speed is **bandwidth ÷ weight bytes**, multiplied by the number of GPUs with tensor parallelism.
+- Choose hardware in order: **fit → speed → users → cost → software support**. Cost per token, not cost per hour, is what matters.
+
+</Takeaways>
