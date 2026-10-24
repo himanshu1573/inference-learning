@@ -1,0 +1,446 @@
+---
+// "Will it fit?" calculator: weights + KV cache + overhead vs GPU memory.
+// Styled like the iotamine VM configurator. Safe to use more than once per page.
+
+const presets = [
+  { id: 'l8', label: 'Llama 3.1 8B', params: 8.03, layers: 32, kvHeads: 8, headDim: 128 },
+  { id: 'm7', label: 'Mistral 7B', params: 7.24, layers: 32, kvHeads: 8, headDim: 128 },
+  { id: 'l70', label: 'Llama 3.1 70B', params: 70.6, layers: 80, kvHeads: 8, headDim: 128 },
+  { id: 'l405', label: 'Llama 3.1 405B', params: 405.9, layers: 126, kvHeads: 8, headDim: 128 },
+];
+
+const gpus = [
+  { id: 'l40s', label: 'L40S', mem: 48, bw: 864 },
+  { id: 'a100', label: 'A100 80GB', mem: 80, bw: 2039 },
+  { id: 'h100', label: 'H100', mem: 80, bw: 3350 },
+  { id: 'h200', label: 'H200', mem: 141, bw: 4800 },
+  { id: 'b200', label: 'B200', mem: 180, bw: 8000 },
+  { id: 'mi300x', label: 'MI300X', mem: 192, bw: 5300 },
+];
+
+const weightFormats = [
+  { id: '2', label: 'BF16' },
+  { id: '1', label: 'FP8' },
+  { id: '0.5', label: 'INT4' },
+];
+const kvFormats = [
+  { id: '2', label: 'BF16' },
+  { id: '1', label: 'FP8' },
+];
+
+interface Props {
+  model?: string;
+  gpu?: string;
+}
+const { model = 'l8', gpu = 'h100' } = Astro.props;
+---
+<div class="fit" data-fit-calc data-presets={JSON.stringify(presets)} data-gpus={JSON.stringify(gpus)}>
+  <div class="fit-head card">
+    <div class="fh-top">
+      <div class="fh-title">
+        <strong>Will it fit?</strong>
+        <span class="live-pill">live</span>
+      </div>
+      <span class="mono fh-sub">GPU memory calculator</span>
+    </div>
+    <p class="fh-note mono">Move anything. The numbers update as you go.</p>
+  </div>
+
+  <div class="chips" role="group" aria-label="Model preset">
+    {presets.map((p) => (
+      <button type="button" class="chip" data-preset={p.id} aria-pressed={String(p.id === model)}>{p.label}</button>
+    ))}
+  </div>
+
+  <!-- 1. Model -->
+  <section class="panel card">
+    <header class="ph"><span class="ph-n mono">1</span><span>Model format</span></header>
+    <div class="row">
+      <span class="lbl mono">Weights stored as</span>
+      <div class="seg" role="group" aria-label="Weight format">
+        {weightFormats.map((f, i) => (
+          <button type="button" data-wbytes={f.id} aria-pressed={String(i === 0)}>{f.label}</button>
+        ))}
+      </div>
+    </div>
+    <div class="row">
+      <span class="lbl mono">KV cache stored as</span>
+      <div class="seg" role="group" aria-label="KV cache format">
+        {kvFormats.map((f, i) => (
+          <button type="button" data-kvbytes={f.id} aria-pressed={String(i === 0)}>{f.label}</button>
+        ))}
+      </div>
+    </div>
+    <p class="hint mono" data-out="arch"></p>
+  </section>
+
+  <!-- 2. Hardware -->
+  <section class="panel card">
+    <header class="ph"><span class="ph-n mono">2</span><span>Hardware</span></header>
+    <div class="gpu-grid" role="group" aria-label="GPU type">
+      {gpus.map((g) => (
+        <button type="button" class="gpu" data-gpu={g.id} aria-pressed={String(g.id === gpu)}>
+          <span class="g-name">{g.label}</span>
+          <span class="g-mem mono">{g.mem} GB · {g.bw >= 1000 ? (g.bw / 1000).toFixed(2) + ' TB/s' : g.bw + ' GB/s'}</span>
+        </button>
+      ))}
+    </div>
+    <label class="slider">
+      <span class="s-top"><span class="lbl mono">Number of GPUs</span><span class="val" data-out="ngpu">1</span></span>
+      <input type="range" min="0" max="3" step="1" value="0" data-in="ngpu" aria-label="Number of GPUs" />
+      <span class="s-ends mono"><span>1</span><span>8</span></span>
+    </label>
+    <label class="slider">
+      <span class="s-top"><span class="lbl mono">Memory the engine may use</span><span class="val" data-out="util">90%</span></span>
+      <input type="range" min="80" max="95" step="1" value="90" data-in="util" aria-label="Memory utilisation" />
+      <span class="s-ends mono"><span>80%</span><span>95%</span></span>
+    </label>
+  </section>
+
+  <!-- 3. Workload -->
+  <section class="panel card">
+    <header class="ph"><span class="ph-n mono">3</span><span>Workload</span></header>
+    <label class="slider">
+      <span class="s-top"><span class="lbl mono">Context length per sequence</span><span class="val" data-out="ctx">8K tokens</span></span>
+      <input type="range" min="0" max="7" step="1" value="3" data-in="ctx" aria-label="Context length" />
+      <span class="s-ends mono"><span>1K</span><span>128K</span></span>
+    </label>
+    <label class="slider">
+      <span class="s-top"><span class="lbl mono">Sequences at the same time</span><span class="val" data-out="seqs">32</span></span>
+      <input type="range" min="0" max="8" step="1" value="5" data-in="seqs" aria-label="Concurrent sequences" />
+      <span class="s-ends mono"><span>1</span><span>256</span></span>
+    </label>
+  </section>
+
+  <!-- Breakdown -->
+  <section class="panel card">
+    <span class="lbl mono">Memory breakdown (all GPUs together)</span>
+    <div class="bar" aria-hidden="true">
+      <span class="seg-w" data-bar="w"></span>
+      <span class="seg-o" data-bar="o"></span>
+      <span class="seg-k" data-bar="k"></span>
+      <span class="seg-f" data-bar="f"></span>
+      <span class="seg-r" data-bar="r"></span>
+    </div>
+    <ul class="legend">
+      <li><span class="dot d-w"></span>Weights<span class="mono" data-out="w"></span></li>
+      <li><span class="dot d-o"></span>Overhead<span class="mono" data-out="o"></span></li>
+      <li><span class="dot d-k"></span>KV cache needed<span class="mono" data-out="k"></span></li>
+      <li><span class="dot d-f"></span>Free for more KV<span class="mono" data-out="f"></span></li>
+      <li><span class="dot d-r"></span>Kept in reserve<span class="mono" data-out="r"></span></li>
+    </ul>
+  </section>
+
+  <!-- Result -->
+  <section class="panel card result">
+    <div class="sum-chips" data-out="chips"></div>
+    <div class="res-row">
+      <div>
+        <p class="res-line" data-out="verdict"></p>
+        <p class="res-sub mono" data-out="sub"></p>
+      </div>
+      <span class="badge mono" data-out="badge"></span>
+    </div>
+    <div class="formulas mono" data-out="formulas"></div>
+  </section>
+  <p class="foot mono">Estimate only. Overhead is set to 4 GB per GPU (CUDA context, temporary buffers, CUDA graphs). Real engines differ a little.</p>
+</div>
+
+<script>
+  type Preset = { id: string; label: string; params: number; layers: number; kvHeads: number; headDim: number };
+  type Gpu = { id: string; label: string; mem: number; bw: number };
+
+  const CTX = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+  const SEQS = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+  const NGPU = [1, 2, 4, 8];
+  const OVERHEAD_PER_GPU = 4; // GB
+
+  const gb = (x: number) => (x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2)) + ' GB';
+  const kfmt = (n: number) => (n >= 1024 ? n / 1024 + 'K' : String(n));
+  const big = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+
+  document.querySelectorAll<HTMLElement>('[data-fit-calc]').forEach((root) => {
+    const presets: Preset[] = JSON.parse(root.dataset.presets!);
+    const gpus: Gpu[] = JSON.parse(root.dataset.gpus!);
+    const $ = <T extends HTMLElement>(sel: string) => root.querySelector<T>(sel)!;
+    const out = (name: string) => $(`[data-out="${name}"]`);
+
+    const state = {
+      preset: presets.find((p) => root.querySelector(`[data-preset="${p.id}"][aria-pressed="true"]`)) ?? presets[0],
+      gpu: gpus.find((g) => root.querySelector(`[data-gpu="${g.id}"][aria-pressed="true"]`)) ?? gpus[0],
+      wBytes: 2,
+      kvBytes: 2,
+    };
+
+    function pressGroup(attr: string, value: string) {
+      root.querySelectorAll<HTMLButtonElement>(`[${attr}]`).forEach((b) => {
+        b.setAttribute('aria-pressed', String(b.getAttribute(attr) === value));
+      });
+    }
+
+    root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.preset = presets.find((p) => p.id === b.dataset.preset)!;
+        pressGroup('data-preset', b.dataset.preset!);
+        update();
+      }),
+    );
+    root.querySelectorAll<HTMLButtonElement>('[data-gpu]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.gpu = gpus.find((g) => g.id === b.dataset.gpu)!;
+        pressGroup('data-gpu', b.dataset.gpu!);
+        update();
+      }),
+    );
+    root.querySelectorAll<HTMLButtonElement>('[data-wbytes]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.wBytes = Number(b.dataset.wbytes);
+        pressGroup('data-wbytes', b.dataset.wbytes!);
+        update();
+      }),
+    );
+    root.querySelectorAll<HTMLButtonElement>('[data-kvbytes]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.kvBytes = Number(b.dataset.kvbytes);
+        pressGroup('data-kvbytes', b.dataset.kvbytes!);
+        update();
+      }),
+    );
+    const inputs = root.querySelectorAll<HTMLInputElement>('input[type="range"]');
+    inputs.forEach((i) => i.addEventListener('input', update));
+
+    const val = (name: string) => Number($<HTMLInputElement>(`[data-in="${name}"]`).value);
+
+    function setBar(name: string, part: number, total: number) {
+      $(`[data-bar="${name}"]`).style.width = `${Math.max(0, (part / total) * 100)}%`;
+    }
+
+    function update() {
+      inputs.forEach((i) => {
+        const p = ((Number(i.value) - Number(i.min)) / (Number(i.max) - Number(i.min))) * 100;
+        i.style.setProperty('--fill', `${p}%`);
+      });
+
+      const { preset: m, gpu: g, wBytes, kvBytes } = state;
+      const n = NGPU[val('ngpu')];
+      const util = val('util') / 100;
+      const ctx = CTX[val('ctx')];
+      const seqs = SEQS[val('seqs')];
+
+      const total = g.mem * n;
+      const usable = total * util;
+      const reserve = total - usable;
+      const weights = m.params * wBytes; // params in billions -> GB
+      const overhead = OVERHEAD_PER_GPU * n;
+      const kvPerToken = 2 * m.layers * m.kvHeads * m.headDim * kvBytes; // bytes
+      const kvNeeded = (seqs * ctx * kvPerToken) / 1e9; // GB
+      const kvRoom = usable - weights - overhead;
+      const fits = kvRoom >= kvNeeded && kvRoom > 0;
+      const maxSeqs = kvRoom > 0 ? Math.floor((kvRoom * 1e9) / (ctx * kvPerToken)) : 0;
+      const tokensFit = kvRoom > 0 ? Math.floor((kvRoom * 1e9) / kvPerToken) : 0;
+      const speed = (n * g.bw) / weights; // GB/s / GB = tokens per second per sequence (ideal)
+      const perGpuUsable = g.mem * util - OVERHEAD_PER_GPU;
+      const needN = Math.ceil((weights + kvNeeded) / perGpuUsable);
+
+      out('ngpu').textContent = String(n);
+      out('util').textContent = `${Math.round(util * 100)}%`;
+      out('ctx').textContent = `${kfmt(ctx)} tokens`;
+      out('seqs').textContent = String(seqs);
+      out('arch').textContent = `${m.label}: ${m.params}B params · ${m.layers} layers · ${m.kvHeads} KV heads · head size ${m.headDim}`;
+
+      // Bar: weights, overhead, KV used, free, reserve. Everything is a share of total memory.
+      const kvShown = Math.min(kvNeeded, Math.max(0, kvRoom));
+      const free = Math.max(0, kvRoom - kvNeeded);
+      const over = Math.max(0, weights + overhead - usable);
+      setBar('w', Math.min(weights, usable), total);
+      setBar('o', Math.max(0, Math.min(overhead, usable - weights)), total);
+      setBar('k', kvShown, total);
+      setBar('f', free, total);
+      setBar('r', reserve, total);
+      $('[data-bar="k"]').classList.toggle('short', !fits);
+
+      out('w').textContent = gb(weights);
+      out('o').textContent = gb(overhead);
+      out('k').textContent = gb(kvNeeded);
+      out('f').textContent = gb(free);
+      out('r').textContent = gb(reserve);
+
+      const fmtName = (wBytes === 2 ? 'BF16' : wBytes === 1 ? 'FP8' : 'INT4');
+      out('chips').innerHTML = [
+        m.label,
+        fmtName,
+        `${n} × ${g.label}`,
+        `${kfmt(ctx)} context`,
+        `${seqs} seq`,
+      ]
+        .map((t) => `<span class="tag"><span class="dot"></span>${t}</span>`)
+        .join('');
+
+      const verdict = out('verdict');
+      const badge = out('badge');
+      if (fits) {
+        const pct = Math.round((free / total) * 100);
+        verdict.textContent = `Fits on ${n} × ${g.label} · ${pct}% free`;
+        badge.textContent = 'FITS';
+        badge.className = 'badge mono ok';
+        out('sub').textContent = `Room for ${big(tokensFit)} tokens of KV cache, or about ${big(maxSeqs)} sequences at ${kfmt(ctx)}. Best-case decode ≈ ${big(speed)} tokens/s per sequence.`;
+      } else {
+        const why =
+          over > 0
+            ? `The weights and overhead alone are ${gb(weights + overhead)}, but only ${gb(usable)} is usable.`
+            : `The KV cache needs ${gb(kvNeeded)}, but only ${gb(kvRoom)} is left after the weights.`;
+        verdict.textContent =
+          needN > 8 ? `Does not fit · needs more than one 8-GPU server` : `Does not fit · needs ≥ ${needN} × ${g.label}`;
+        badge.textContent = 'TOO BIG';
+        badge.className = 'badge mono bad';
+        out('sub').textContent = `${why} ${maxSeqs > 0 ? `Max now: ${big(maxSeqs)} sequences at ${kfmt(ctx)}.` : ''}`;
+      }
+
+      out('formulas').innerHTML = [
+        `weights = ${m.params}B × ${wBytes} bytes = <b>${gb(weights)}</b>`,
+        `KV per token = 2 × ${m.layers} × ${m.kvHeads} × ${m.headDim} × ${kvBytes} B = <b>${big(kvPerToken)} B</b>`,
+        `KV needed = ${seqs} × ${big(ctx)} × ${big(kvPerToken)} B = <b>${gb(kvNeeded)}</b>`,
+        `usable = ${n} × ${g.mem} GB × ${util.toFixed(2)} = <b>${gb(usable)}</b>`,
+        `left for KV = usable − weights − ${n} × ${OVERHEAD_PER_GPU} GB = <b>${gb(kvRoom)}</b>`,
+      ]
+        .map((l) => `<div>${l}</div>`)
+        .join('');
+    }
+
+    update();
+  });
+</script>
+
+<style>
+  .fit {
+    margin: 2.2em 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .fit-head { padding: 16px 18px; }
+  .fh-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+  .fh-title { display: flex; align-items: center; gap: 10px; }
+  .fh-title strong { font-size: 15px; }
+  .fh-sub { font-size: 11px; color: var(--text-3); letter-spacing: 0.08em; text-transform: uppercase; }
+  .fh-note { font-size: 11.5px; color: var(--text-3); margin-top: 6px; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 6px 11px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .chip:hover { border-color: var(--border-strong); color: var(--text); }
+  .chip[aria-pressed='true'] { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
+
+  .panel { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+  .ph { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14.5px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .ph-n {
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: 1.5px solid var(--accent);
+    color: var(--accent-text);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+  .row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+  .lbl { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-2); }
+  .hint { font-size: 11.5px; color: var(--text-3); }
+
+  .seg { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-3); }
+  .seg button {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 5px 12px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .seg button[aria-pressed='true'] { background: var(--accent); color: var(--on-accent); }
+
+  .gpu-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .gpu {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+  }
+  .gpu:hover { border-color: var(--border-strong); }
+  .gpu[aria-pressed='true'] { border-color: var(--accent); background: var(--accent-soft); }
+  .g-name { font-weight: 600; font-size: 13.5px; }
+  .gpu[aria-pressed='true'] .g-name { color: var(--accent-text); }
+  .g-mem { font-size: 10.5px; color: var(--text-3); }
+
+  .slider { display: flex; flex-direction: column; gap: 4px; }
+  .s-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .val { font-weight: 700; font-size: 14px; font-family: var(--font-mono); color: var(--text); }
+  .s-ends { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-3); }
+
+  .bar {
+    display: flex;
+    height: 14px;
+    border-radius: 7px;
+    overflow: hidden;
+    background: var(--surface-2);
+  }
+  .bar span { height: 100%; transition: width 0.25s ease; }
+  .seg-w, .d-w { background: var(--accent); }
+  .seg-o, .d-o { background: var(--text-3); }
+  .seg-k, .d-k { background: var(--teal); }
+  .seg-k.short { background: repeating-linear-gradient(45deg, var(--red), var(--red) 5px, var(--red-soft) 5px, var(--red-soft) 9px); }
+  .seg-f, .d-f { background: color-mix(in srgb, var(--teal) 25%, var(--surface-2)); }
+  .seg-r, .d-r { background: var(--border-strong); }
+  .legend { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px 18px; }
+  .legend li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); margin: 0 !important; }
+  .legend li .mono { margin-left: auto; color: var(--text); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+
+  .sum-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .res-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .res-line { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; color: var(--text); line-height: 1.25; }
+  .res-sub { font-size: 12px; color: var(--text-2); margin-top: 6px; line-height: 1.6; }
+  .badge { font-size: 11px; font-weight: 600; padding: 5px 10px; border-radius: 999px; flex: none; }
+  .badge.ok { background: var(--green-soft); color: var(--green); }
+  .badge.bad { background: var(--red-soft); color: var(--red); }
+  .formulas {
+    font-size: 11.5px;
+    color: var(--text-2);
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 10px 12px;
+    display: grid;
+    gap: 4px;
+    overflow-x: auto;
+  }
+  .formulas :global(b) { color: var(--accent-text); font-weight: 600; }
+  .foot { font-size: 11px; color: var(--text-3); text-align: center; }
+
+  @media (max-width: 560px) {
+    .gpu-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .res-row { flex-direction: column-reverse; }
+    .res-line { font-size: 18px; }
+  }
+</style>
