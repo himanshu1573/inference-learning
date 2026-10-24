@@ -1,0 +1,372 @@
+---
+title: 'Inside a GPU: SMs, Cores and Tensor Cores'
+description: 'Open the GPU and meet its parts: SMs, CUDA cores, Tensor Cores, threads and warps. Then calculate the peak speed of an H100 yourself.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import GpuChipLayout from '../../../components/figures/gpu-hardware/GpuChipLayout.astro';
+import GpuSmDetail from '../../../components/figures/gpu-hardware/GpuSmDetail.astro';
+import GpuThreadsWarps from '../../../components/figures/gpu-hardware/GpuThreadsWarps.astro';
+import GpuTensorCoreTile from '../../../components/figures/gpu-hardware/GpuTensorCoreTile.astro';
+import GpuLatencyHiding from '../../../components/figures/gpu-hardware/GpuLatencyHiding.astro';
+
+In the last chapter, we said a GPU has "thousands of simple cores". That is true, but it is not the full picture. In this chapter, we open the GPU and look at how those cores are organised, how work is given to them, and what the special **Tensor Cores** do. At the end, you will be able to take a few numbers from a spec sheet and calculate the famous "989 TFLOPS" of the H100 yourself.
+
+<NewWords
+  words={[
+    { word: 'SM (Streaming Multiprocessor)', meaning: 'The main building block of an NVIDIA GPU. Each SM is like a small processor with its own cores and fast memory. An H100 has 132.' },
+    { word: 'GPC', meaning: 'Graphics Processing Cluster. A group of SMs. An H100 chip has 8 of them.' },
+    { word: 'CUDA core', meaning: 'A simple math unit that does one multiply-add on single numbers per clock.' },
+    { word: 'Tensor Core', meaning: 'A special math unit that multiplies small matrices (tiles) in one go. It does most of the work in LLMs.' },
+    { word: 'Clock (cycle)', meaning: 'The heartbeat of the chip. Each tick, every unit can do one step. The H100 ticks about 1.8 billion times per second (1.8 GHz).' },
+    { word: 'Kernel', meaning: 'A small program that runs on the GPU, for example "multiply these two matrices".' },
+    { word: 'Thread', meaning: 'One copy of the kernel code, working on its own piece of data.' },
+    { word: 'Warp', meaning: 'A group of 32 threads that always run the same instruction together.' },
+    { word: 'Block', meaning: 'A group of threads (up to 1,024) that run on the same SM and can share fast memory.' },
+    { word: 'Register', meaning: 'The fastest and smallest memory, inside each core area. Each thread keeps its working numbers here.' },
+  ]}
+/>
+
+## The big picture: a city of workers
+
+Before we look at the parts, here is a simple picture to keep in mind.
+
+<Callout type="analogy" title="A factory city">
+
+Think of the GPU as a **city of factories**. The city has 8 districts (the **GPCs**). Each district has many factories (the **SMs**). Inside each factory, there are 4 work halls (the **sub-partitions**). Each hall has a manager (the **warp scheduler**), a set of shelves for tools and parts (the **registers**), many simple workers (the **CUDA cores**) and one big special machine for matrix work (the **Tensor Core**). Outside the city is a big warehouse where all the materials are stored (the **HBM memory**).
+
+</Callout>
+
+The important lesson of this picture: **the GPU is not one big processor.** It is many small, independent processors (SMs) that share one memory. A big job, like a matrix multiply, is cut into many pieces, and each SM works on its own pieces.
+
+## The whole chip
+
+Let us look at the real H100. On the chip, the SMs are grouped into **8 GPCs**. In the middle, there is a shared **L2 cache** of 50 MB. Around the chip, there are stacks of **HBM** memory, 80 GB in total.
+
+<Figure n="3.1" title="Plan of the H100 chip" caption="The H100 chip has 8 GPCs. Each GPC holds up to 18 SMs. In the H100 SXM, 132 SMs are switched on. All SMs share the 50 MB L2 cache and the 80 GB of HBM memory around the chip. One SM is zoomed on the right.">
+  <GpuChipLayout />
+</Figure>
+
+Why are only 132 of the SMs switched on? Making a chip this big is very hard, and almost every chip has a few small defects. So NVIDIA designs the full chip with more SMs (144) and switches some off. This way, a chip with a few bad SMs can still be sold. This is a common trick in chip making.
+
+<Callout type="note">
+
+A diagram like Fig. 3.1 is a **simplified** plan. The real chip has more parts (for example, units for copying data and for video), and the real positions are different. But the important structure is correct: many SMs, one shared L2, and HBM around the outside.
+
+</Callout>
+
+## Inside one SM
+
+The SM is where the work happens, so let us zoom in. Each H100 SM is split into **4 equal quarters**, called **sub-partitions** (sometimes called processing blocks).
+
+<Figure n="3.2" title="One SM, split into 4 sub-partitions" caption="Each of the 4 sub-partitions has its own warp scheduler, a 64 KB register file, 32 FP32 CUDA cores and one Tensor Core. All four share 256 KB of L1 cache and shared memory at the bottom.">
+  <GpuSmDetail />
+</Figure>
+
+Each sub-partition has:
+
+- **A warp scheduler.** Every clock tick, it chooses one group of threads that is ready to work and gives it an instruction.
+- **A register file** of 64 KB. This is the fastest memory on the GPU. The numbers a thread is working on right now live here.
+- **32 FP32 CUDA cores.** Simple math units. Each does one multiply-add on single decimal numbers (32-bit) per clock. (There are also units for whole numbers, for 64-bit numbers, and for special functions like `exp`, but we skip them here.)
+- **One Tensor Core.** A big, specialised unit for multiplying small matrices. For LLMs, this is the most important part.
+
+Below the four quarters, the SM has **256 KB of fast memory** that can be used as an **L1 cache** (automatic) or as **shared memory** (controlled by the programmer). Up to 228 KB of it can be shared memory. All threads in the same block can read and write it. We come back to it in the memory hierarchy chapter, because FlashAttention depends on it.
+
+<Derivation title="How many CUDA cores and Tensor Cores does an H100 have?" result="16,896 FP32 CUDA cores and 528 Tensor Cores.">
+
+1. Each SM has 4 sub-partitions, each with 32 FP32 cores.
+
+   $$
+   4 \times 32 = 128 \text{ FP32 cores per SM}
+   $$
+
+2. The H100 SXM has 132 SMs.
+
+   $$
+   132 \times 128 = 16{,}896 \text{ FP32 cores}
+   $$
+
+3. Each sub-partition has 1 Tensor Core, so 4 per SM.
+
+   $$
+   132 \times 4 = 528 \text{ Tensor Cores}
+   $$
+
+</Derivation>
+
+16,896 is a big number, and it is the one you often see in marketing. But as you will see soon, **the 528 Tensor Cores do far more math than all 16,896 CUDA cores together.**
+
+## How work is given to the GPU: threads, warps, blocks
+
+Hardware is only half of the story. The other half is how a program uses it. GPU programs are written in a special way.
+
+A program that runs on the GPU is called a **kernel**. For example, "multiply matrix W by vector x" is one kernel. When the CPU starts a kernel, it says: "run this code **many times**, once for each small piece of the data". Each copy is called a **thread**.
+
+The threads are organised in three levels:
+
+1. A **warp** is 32 threads. They always run **the same instruction at the same time**, each on its own data.
+2. A **block** is a group of warps (up to 1,024 threads). All threads of a block run on **the same SM**, so they can share that SM's shared memory and wait for each other.
+3. The **grid** is all the blocks of one kernel launch. The GPU spreads the blocks over all its SMs.
+
+<Figure n="3.3" title="Grid, block, warp, thread" caption="One kernel launch creates a grid of blocks. The blocks are spread over the SMs. A block of 256 threads is made of 8 warps. The 32 threads of a warp run the same instruction, each with its own data. NVIDIA calls this SIMT: single instruction, multiple threads.">
+  <GpuThreadsWarps />
+</Figure>
+
+<Callout type="example" title="Matrix-vector multiply as a kernel">
+
+Remember the 4,096 × 4,096 matrix from the last chapter. A very simple kernel could use **one thread per row**: 4,096 threads in total. Thread number 3 computes row 3: it reads the 4,096 weights of row 3 and the input vector, does 4,096 multiply-adds, and writes one output number. If we put 256 threads in each block, we get 4,096 ÷ 256 = **16 blocks**. (Real kernels are cleverer than this, but the idea is the same.)
+
+</Callout>
+
+### Why 32 threads move together
+
+Why group threads into warps? Because controlling each thread separately would need a lot of extra hardware. By making 32 threads follow **one** instruction stream, the GPU needs only one "brain" (instruction fetch and decode) for 32 workers. The saved chip area is used for more math units instead. This is a big part of why the GPU can have so many cores.
+
+There is a cost. If threads in a warp take **different paths** in an `if`, the warp must run both paths, one after the other, and some threads wait. This is called **warp divergence**. Good GPU code avoids it. Luckily, matrix math has almost no `if`, so it fits warps perfectly.
+
+## Tensor Cores: the real engine
+
+Now the most important part of this chapter. A CUDA core does one multiply-add on **single numbers**: `a × b + c`. But LLM work is matrix multiplication. So NVIDIA added **Tensor Cores**: units that multiply a whole **small matrix tile** in one go.
+
+<Figure n="3.4" title="CUDA core vs Tensor Core" caption="A CUDA core does one multiply-add per clock (2 FLOPs). An H100 Tensor Core does 512 multiply-adds per clock with FP16/BF16 numbers (1,024 FLOPs). That is the same amount of work as multiplying an 8 × 16 tile by a 16 × 4 tile. Big matrix multiplies are cut into many such tiles.">
+  <GpuTensorCoreTile />
+</Figure>
+
+To multiply two big matrices, the work is cut into many small tiles. Each warp loads its tiles into registers, and the Tensor Core multiplies them and adds the results to a running total. When all tiles are done, the big result is ready.
+
+Tensor Cores work with smaller number formats like **FP16**, **BF16** and **FP8** (and FP4 on the newest GPUs). They multiply in this smaller format but add up the results in a more precise format (usually FP32), so the answer stays accurate. Smaller formats mean more numbers per tick, which is why every new GPU generation adds a smaller format. We explain these formats in their own chapter.
+
+<Derivation title="Tensor Cores vs CUDA cores in one SM" result="Per clock, the 4 Tensor Cores of one SM do 16× more math than its 128 CUDA cores.">
+
+1. CUDA cores: 128 per SM, each does 1 multiply-add (2 FLOPs) per clock.
+
+   $$
+   128 \times 2 = 256 \text{ FLOPs per clock}
+   $$
+
+2. Tensor Cores: 4 per SM, each does 1,024 FLOPs per clock (dense FP16/BF16).
+
+   $$
+   4 \times 1{,}024 = 4{,}096 \text{ FLOPs per clock}
+   $$
+
+3. Compare.
+
+   $$
+   \frac{4{,}096}{256} = 16
+   $$
+
+</Derivation>
+
+<Callout type="idea">
+
+For LLMs, almost all the math is matrix multiplication, and almost all of it runs on **Tensor Cores**. When you read "an H100 has 989 TFLOPS", that number is the **Tensor Core** speed. If a program cannot use Tensor Cores (for example, because it uses an unsupported number format), it is about 15 times slower.
+
+</Callout>
+
+## Calculate the peak speed yourself
+
+Now we have all the pieces to calculate the headline number of the H100. We just multiply: how many Tensor Cores, how much work each does per tick, and how many ticks per second.
+
+<Derivation title="Peak dense BF16 speed of the H100 SXM" result="About 989 TFLOPS: the number on NVIDIA's spec sheet.">
+
+1. Number of Tensor Cores: 132 SMs, 4 Tensor Cores each.
+
+   $$
+   132 \times 4 = 528
+   $$
+
+2. Work per Tensor Core per clock (dense FP16/BF16): 512 multiply-adds.
+
+   $$
+   512 \times 2 = 1{,}024 \text{ FLOPs per clock}
+   $$
+
+3. FLOPs per clock for the whole GPU.
+
+   $$
+   528 \times 1{,}024 = 540{,}672 \text{ FLOPs per clock}
+   $$
+
+4. NVIDIA uses a clock of about 1.83 GHz for this number (1.83 billion ticks per second).
+
+   $$
+   540{,}672 \times 1.83 \times 10^{9} \approx 989 \times 10^{12} \text{ FLOPs/s}
+   $$
+
+</Derivation>
+
+The same method works for other formats. With **FP8**, each Tensor Core does twice as many operations per tick, so the H100 reaches about **1,979 TFLOPS**. For the plain CUDA cores with FP32, NVIDIA gives about **67 TFLOPS**, roughly 15 times less than the Tensor Core BF16 number. (NVIDIA quotes the CUDA core number at a slightly higher clock, about 1.98 GHz: $16{,}896 \times 2 \times 1.98 \times 10^{9} \approx 67 \times 10^{12}$.)
+
+<Callout type="warning" title="'Dense' vs 'sparse' numbers">
+
+Spec sheets often show two numbers, for example **989** and **1,979** TFLOPS for BF16. The bigger one uses a feature called **structured sparsity**: it skips half of the weights if they are zero in a special pattern. Normal LLMs do not have this pattern, so the bigger number does not apply to them. **In this book, we always use dense numbers.** When you compare GPUs, make sure you compare dense with dense.
+
+</Callout>
+
+<KeyNumbers
+  items={[
+    { value: '132', label: 'SMs in the H100 SXM' },
+    { value: '528', label: 'Tensor Cores (4 per SM)' },
+    { value: '1,024', label: 'BF16 FLOPs per Tensor Core per clock' },
+    { value: '~989 TFLOPS', label: 'peak dense BF16 speed' },
+  ]}
+/>
+
+## Keeping the workers busy
+
+989 TFLOPS is a **peak** number. To reach it, every Tensor Core must be busy on every tick. That is hard, mostly because of one problem: **reading data from HBM memory is slow.** When a warp asks for data from HBM, it must wait for many hundreds of clock ticks before the data arrives.
+
+The GPU solves this in a clever way. Each SM keeps **many warps** ready at the same time (up to 64 warps, which is 2,048 threads, on an H100 SM). When one warp is waiting for memory, the scheduler simply picks another warp that is ready. Switching costs nothing, because every warp keeps its numbers in its own registers all the time.
+
+<Figure n="3.5" title="Hiding the wait with many warps" caption="Each warp computes for a short time, then waits a long time for memory. Because the scheduler can switch to another ready warp on every clock, the SM stays busy. With too few warps (see the red gap), there are moments when no warp is ready and the SM sits idle.">
+  <GpuLatencyHiding />
+</Figure>
+
+<Callout type="analogy" title="A chess master playing many games">
+
+A chess master plays against 30 people at once. She makes a move on board 1, and while that player thinks, she moves to board 2, then board 3. She is never idle, even though each single game is slow. The SM does the same with warps: while one warp "thinks" (waits for memory), it works on another.
+
+</Callout>
+
+This is a key difference from a CPU. A CPU tries to make each wait **shorter** (with big caches and smart prediction). A GPU accepts long waits and **hides** them with lots of parallel work. This is why the GPU needs so many threads to be efficient, and why a tiny job (with few threads) cannot use a big GPU well.
+
+<DeepDive title="Occupancy: how many warps can an SM really hold?">
+
+The number of warps that are active on an SM, compared to the maximum (64 on H100), is called **occupancy**. It is limited by the resources each warp needs. The most common limit is **registers**.
+
+Each SM has 256 KB of registers. One register holds 4 bytes, so that is:
+
+$$
+\frac{256 \times 1{,}024 \text{ bytes}}{4 \text{ bytes}} = 65{,}536 \text{ registers per SM}
+$$
+
+If every thread uses **32 registers**, the SM can hold:
+
+$$
+\frac{65{,}536}{32} = 2{,}048 \text{ threads} = 64 \text{ warps (full occupancy)}
+$$
+
+If every thread uses **128 registers** (common in fast matrix kernels that keep big tiles in registers):
+
+$$
+\frac{65{,}536}{128} = 512 \text{ threads} = 16 \text{ warps (25\% occupancy)}
+$$
+
+Shared memory can limit occupancy in the same way: if each block needs 100 KB of shared memory, only 2 blocks fit in the 228 KB.
+
+**Is low occupancy bad?** Not always. Fast matrix kernels (and FlashAttention) often run at low occupancy on purpose. They keep a lot of data in registers and shared memory, and they load the next tile **while** computing the current one (this is called pipelining). This hides memory waits without needing many warps. The newest GPUs even have special hardware to help: the **Tensor Memory Accelerator (TMA)** on H100 copies whole tiles from memory to shared memory in the background.
+
+How much data must be "on the way" to keep memory fully busy? A simple rule called **Little's law** says:
+
+$$
+\text{data in flight} = \text{bandwidth} \times \text{latency}
+$$
+
+With 3.35 TB/s and a memory latency of very roughly 600 nanoseconds:
+
+$$
+3.35 \times 10^{12} \times 600 \times 10^{-9} \approx 2 \text{ MB}
+$$
+
+So about 2 MB of memory requests must be waiting at every moment, across the whole GPU. That is about 15 KB per SM. If the kernel does not have that much in flight, memory bandwidth is wasted, no matter how fast the HBM is. (The latency number here is a rough estimate; real values depend on the access pattern.)
+
+</DeepDive>
+
+## Three generations: A100, H100, B200
+
+NVIDIA releases a new data-centre GPU about every two years. Here are the three you will meet most often in LLM serving today. All compute numbers are **dense** (no sparsity) and approximate.
+
+| | A100 (2020) | H100 SXM (2022) | B200 (2024) |
+| --- | --- | --- | --- |
+| Architecture | Ampere | Hopper | Blackwell |
+| Tensor Core generation | 3rd | 4th | 5th |
+| SMs | <span class="num">108</span> | <span class="num">132</span> | two chips in one package |
+| BF16 dense | <span class="num">312 TFLOPS</span> | <span class="num">989 TFLOPS</span> | <span class="num">~2,250 TFLOPS</span> |
+| FP8 dense | not supported | <span class="num">1,979 TFLOPS</span> | <span class="num">~4,500 TFLOPS</span> |
+| FP4 dense | not supported | not supported | <span class="num">~9,000 TFLOPS</span> |
+| Memory | 80 GB HBM2e | 80 GB HBM3 | ~180–192 GB HBM3e |
+| Memory bandwidth | <span class="num">~2.0 TB/s</span> | <span class="num">3.35 TB/s</span> | <span class="num">~8 TB/s</span> |
+| L2 cache | 40 MB | 50 MB | larger |
+| NVLink (per GPU) | 600 GB/s | 900 GB/s | 1,800 GB/s |
+
+Look at how the numbers grow from A100 to H100: math speed (BF16) grows about **3.2 times**, but memory bandwidth grows only about **1.7 times**. This pattern repeats in almost every generation: **math gets faster more quickly than memory does.**
+
+<Derivation title="FLOPs per byte: how much math per byte of memory?" result="A100: about 156. H100: about 295. B200: about 281. A modern GPU must do roughly 300 FLOPs on each byte it reads to keep its Tensor Cores busy.">
+
+1. Divide peak math speed by memory bandwidth.
+
+   $$
+   \text{A100: } \frac{312 \times 10^{12}}{2.0 \times 10^{12}} \approx 156 \text{ FLOPs per byte}
+   $$
+
+2. For the H100:
+
+   $$
+   \frac{989 \times 10^{12}}{3.35 \times 10^{12}} \approx 295 \text{ FLOPs per byte}
+   $$
+
+3. For the B200:
+
+   $$
+   \frac{2{,}250 \times 10^{12}}{8 \times 10^{12}} \approx 281 \text{ FLOPs per byte}
+   $$
+
+</Derivation>
+
+Remember what decode does: for each weight (2 bytes in BF16) it does 2 FLOPs. That is only **1 FLOP per byte**, far below the 295 the H100 needs. This is why decode leaves the Tensor Cores mostly idle, and why the next chapters are all about **memory**. The number "FLOPs per byte" will become the centre of the roofline model.
+
+<Callout type="real" title="Not only NVIDIA">
+
+AMD GPUs use a very similar design with different names. An AMD **Compute Unit (CU)** is like an SM, a **wavefront** (64 threads on AMD Instinct GPUs) is like a warp, and **Matrix Cores** are like Tensor Cores. The AMD MI300X has 304 CUs and 192 GB of HBM3. Once you understand one design, you can read the other.
+
+</Callout>
+
+## Check yourself
+
+<Quiz n={1} q="What is the difference between a CUDA core and a Tensor Core?">
+
+A CUDA core does one multiply-add on single numbers per clock (2 FLOPs). A Tensor Core multiplies a small matrix tile per clock: on the H100, 512 multiply-adds (1,024 FLOPs) with BF16. Almost all LLM math runs on Tensor Cores.
+
+</Quiz>
+
+<Quiz n={2} q="A kernel launches 8,192 threads in blocks of 256. How many blocks and how many warps are there?">
+
+8,192 ÷ 256 = **32 blocks**. Each block has 256 ÷ 32 = 8 warps, so there are 32 × 8 = **256 warps** in total.
+
+</Quiz>
+
+<Quiz n={3} q="The A100 has 108 SMs, 4 Tensor Cores per SM, and does 312 TFLOPS of dense BF16 at about 1.41 GHz. How many FLOPs does one A100 Tensor Core do per clock?">
+
+312 × 10¹² ÷ (108 × 4 × 1.41 × 10⁹) ≈ **512 FLOPs per clock** (256 multiply-adds). The H100 Tensor Core does 1,024: twice as much per clock.
+
+</Quiz>
+
+<Quiz n={4} q="Why does an SM keep many warps active at the same time?">
+
+To **hide memory latency**. When one warp waits hundreds of clocks for data from HBM, the scheduler runs another warp that is ready. With enough warps, the math units are almost never idle.
+
+</Quiz>
+
+<Quiz n={5} q="A spec sheet says '1,979 TFLOPS BF16 (with sparsity)'. What number should you use for a normal LLM?">
+
+The **dense** number, which is half: about **989 TFLOPS**. Normal LLM weights do not have the special sparsity pattern, so the sparse number does not apply.
+
+</Quiz>
+
+<Takeaways>
+
+- A GPU is many small processors (**SMs**) sharing one memory. The H100 SXM has **132 SMs** in 8 GPCs, a **50 MB L2** cache and **80 GB of HBM**.
+- Each SM has **4 sub-partitions**, each with a warp scheduler, a **64 KB register file**, 32 CUDA cores and **1 Tensor Core**.
+- Programs run as **kernels**: a grid of **blocks**, made of **warps** of **32 threads** that run the same instruction (SIMT).
+- **Tensor Cores** multiply small matrix tiles and do almost all LLM math. Peak = Tensor Cores × FLOPs per clock × clock speed: **528 × 1,024 × 1.83 GHz ≈ 989 TFLOPS**.
+- GPUs **hide** memory waits by switching between many warps. Math speed grows faster than memory speed in every generation, so a modern GPU needs about **300 FLOPs per byte** to stay busy.
+
+</Takeaways>
