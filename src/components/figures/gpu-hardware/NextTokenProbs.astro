@@ -1,0 +1,24 @@
+---
+// Example probabilities for the next token after "The capital of France is".
+const rows = [
+  { tok: '“ Paris”', p: 0.91 },
+  { tok: '“ a”', p: 0.03 },
+  { tok: '“ the”', p: 0.02 },
+  { tok: '“ located”', p: 0.01 },
+  { tok: '“ known”', p: 0.008 },
+  { tok: 'all other 128,251', p: 0.022 },
+];
+const maxW = 440;
+---
+<svg viewBox="0 0 720 270" role="img" aria-label="Bar chart: after 'The capital of France is', the token ' Paris' gets 91 percent, other tokens get very small probabilities">
+  <text x="20" y="26" class="t2" font-size="12">Prompt: <tspan class="t mono" font-weight="600">The capital of France is</tspan></text>
+  {rows.map((r, i) => (
+    <g>
+      <text x="170" y={66 + i * 34} class={i === 0 ? 'ta mono' : 't2 mono'} font-size="12.5" text-anchor="end" font-weight={i === 0 ? '700' : '400'}>{r.tok}</text>
+      <rect x="184" y={52 + i * 34} width={maxW} height="20" rx="4" class="fill-soft" />
+      <rect x="184" y={52 + i * 34} width={Math.max(3, r.p * maxW)} height="20" rx="4" class={i === 0 ? 'fill-a' : 'line-t'} style={i === 0 ? '' : 'fill: var(--text-3)'} />
+      <text x={190 + Math.max(3, r.p * maxW)} y={66 + i * 34} class={i === 0 ? 'ta mono' : 't3 mono'} font-size="11.5" style={i === 0 ? 'fill: var(--on-accent)' : ''} dx={i === 0 ? -50 : 0}>{(r.p * 100).toFixed(r.p < 0.01 ? 1 : 0)}%</text>
+    </g>
+  ))}
+  <text x="184" y="262" class="t3" font-size="11">All probabilities add up to 100%. Numbers are an example; real values depend on the model.</text>
+</svg>

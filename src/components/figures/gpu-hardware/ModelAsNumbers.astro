@@ -1,0 +1,46 @@
+---
+// A model is a big file of numbers: weight matrix -> layers -> one file.
+const nums = [
+  ['0.12', '-0.83', '0.05', '1.27', '-0.40'],
+  ['-0.66', '0.31', '0.98', '-0.09', '0.22'],
+  ['0.47', '-1.15', '0.18', '0.73', '-0.58'],
+  ['0.03', '0.64', '-0.27', '-0.91', '0.36'],
+];
+---
+<svg viewBox="0 0 720 270" role="img" aria-label="A weight matrix full of numbers, many matrices make a layer, 32 layers make the model file of 16 GB">
+  <defs>
+    <marker id="man-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <!-- weight matrix -->
+  <text x="20" y="28" class="t" font-size="13" font-weight="700">One weight matrix</text>
+  <text x="20" y="46" class="t3" font-size="11">thousands of rows × thousands of columns</text>
+  <rect x="20" y="60" width="230" height="150" rx="10" class="box" />
+  {nums.map((row, r) =>
+    row.map((n, c) => (
+      <text x={46 + c * 44} y={92 + r * 32} class={n.startsWith('-') ? 't2 mono' : 'ta mono'} font-size="12" text-anchor="middle">{n}</text>
+    )),
+  )}
+  <text x="135" y="232" class="t3" font-size="11" text-anchor="middle">each number = one “weight” (parameter)</text>
+
+  <path d="M262 135 H318" class="line-a" stroke-width="1.6" marker-end="url(#man-arrow)" />
+
+  <!-- layers -->
+  <text x="330" y="28" class="t" font-size="13" font-weight="700">32 layers</text>
+  <text x="330" y="46" class="t3" font-size="11">each layer has several matrices</text>
+  {[0, 1, 2, 3, 4].map((i) => (
+    <rect x={330 + i * 8} y={168 - i * 22} width="150" height="40" rx="8" class={i === 4 ? 'box-a' : 'box'} />
+  ))}
+  <text x="437" y="82" class="ta" font-size="12" font-weight="600" text-anchor="middle">Layer 32</text>
+  <text x="405" y="193" class="t2" font-size="12" text-anchor="middle">Layer 1</text>
+  <text x="405" y="232" class="t3" font-size="11" text-anchor="middle">same shape, different numbers</text>
+
+  <path d="M530 135 H586" class="line-a" stroke-width="1.6" marker-end="url(#man-arrow)" />
+
+  <!-- file -->
+  <path d="M600 66 h70 l26 26 v120 a8 8 0 0 1 -8 8 h-88 a8 8 0 0 1 -8 -8 v-138 a8 8 0 0 1 8 -8z" class="box-a" stroke-width="1.4" />
+  <path d="M670 66 v26 h26" class="line-a" stroke-width="1.4" />
+  <text x="646" y="140" class="ta mono" font-size="20" font-weight="700" text-anchor="middle">16 GB</text>
+  <text x="646" y="162" class="t2" font-size="11" text-anchor="middle">model file</text>
+  <text x="646" y="246" class="t" font-size="12" font-weight="600" text-anchor="middle">8 billion numbers</text>
+  <text x="646" y="262" class="t3" font-size="11" text-anchor="middle">× 2 bytes each</text>
+</svg>

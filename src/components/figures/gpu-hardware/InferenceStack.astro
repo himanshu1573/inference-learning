@@ -1,0 +1,21 @@
+---
+// The 5 layers of the inference stack and the question each one answers.
+const layers = [
+  { n: '05', name: 'Production', q: 'Is it fast, reliable and affordable for real users?', cls: 'box' },
+  { n: '04', name: 'Kubernetes & Cluster', q: 'How do we run many GPUs and send each user to the right one?', cls: 'box' },
+  { n: '03', name: 'Serving Engines', q: 'How do we serve many users on one GPU at the same time?', cls: 'box' },
+  { n: '02', name: 'Inference Fundamentals', q: 'What math does the model do for each token?', cls: 'box' },
+  { n: '01', name: 'GPU Hardware', q: 'What machine does the math, and what are its limits?', cls: 'box-a' },
+];
+---
+<svg viewBox="0 0 720 320" role="img" aria-label="The five layers of the inference stack, from GPU hardware at the bottom to production at the top">
+  {layers.map((l, i) => (
+    <g>
+      <rect x="20" y={16 + i * 58} width="680" height="48" rx="10" class={l.cls} />
+      <rect x="32" y={28 + i * 58} width="40" height="24" rx="6" class="box2" />
+      <text x="52" y={44 + i * 58} class="ta mono" font-size="12" font-weight="600" text-anchor="middle">{l.n}</text>
+      <text x="88" y={45 + i * 58} class="t" font-size="14" font-weight="700">{l.name}</text>
+      <text x="300" y={45 + i * 58} class="t2" font-size="12.5">{l.q}</text>
+    </g>
+  ))}
+</svg>

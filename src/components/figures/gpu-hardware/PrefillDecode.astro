@@ -1,0 +1,45 @@
+---
+// Timeline: one big prefill step, then many small decode steps.
+const decodeX = [262, 322, 382, 442, 502, 562, 622];
+const outTokens = ['Paris', '.', ' It', ' is', ' a', ' big', ' city'];
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="Timeline: prefill reads all prompt tokens in one big step and makes the first token; then decode makes one token per small step">
+  <defs>
+    <marker id="pd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="t3" /></marker>
+  </defs>
+  <!-- labels -->
+  <text x="40" y="34" class="t" font-size="13" font-weight="700">Prefill</text>
+  <text x="40" y="50" class="t3" font-size="11">read the whole prompt at once</text>
+  <text x="262" y="34" class="t" font-size="13" font-weight="700">Decode</text>
+  <text x="262" y="50" class="t3" font-size="11">write the answer, one token per step</text>
+
+  <!-- prefill block -->
+  <rect x="40" y="70" width="200" height="70" rx="10" class="box-a" />
+  {['The', 'capital', 'of', 'France', 'is'].map((t, i) => (
+    <g>
+      <rect x={50 + i * 37} y="86" width="33" height="20" rx="4" class="box" />
+      <text x={66.5 + i * 37} y="100" class="t2" font-size="8.5" text-anchor="middle">{t}</text>
+    </g>
+  ))}
+  <text x="140" y="128" class="ta" font-size="11" font-weight="600" text-anchor="middle">all 5 tokens in one step</text>
+
+  <!-- decode steps -->
+  {decodeX.map((x, i) => (
+    <g>
+      <rect x={x} y="80" width="50" height="50" rx="8" class="box" />
+      <text x={x + 25} y="109" class="t mono" font-size="11" text-anchor="middle">{outTokens[i]}</text>
+    </g>
+  ))}
+
+  <!-- time axis -->
+  <path d="M40 170 H700" class="line-t" stroke-width="1.2" marker-end="url(#pd-arrow)" />
+  <text x="700" y="190" class="t3 mono" font-size="11" text-anchor="end">time →</text>
+
+  <!-- TTFT -->
+  <path d="M40 200 V212 M312 200 V212 M40 206 H312" class="line-a" stroke-width="1.5" />
+  <text x="176" y="230" class="ta" font-size="12" font-weight="700" text-anchor="middle">Time to first token (TTFT)</text>
+  <!-- TPOT -->
+  <path d="M322 146 V156 M372 146 V156 M322 151 H372" class="line-a" stroke-width="1.5" />
+  <text x="460" y="230" class="t2" font-size="12" text-anchor="start">gap between tokens = <tspan class="ta" font-weight="700">time per output token</tspan></text>
+  <path d="M347 156 V216 H452" class="line" stroke-dasharray="3 3" />
+</svg>

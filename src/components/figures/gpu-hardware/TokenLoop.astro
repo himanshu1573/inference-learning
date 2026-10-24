@@ -1,0 +1,50 @@
+---
+// The generation loop: text -> model -> scores -> pick -> append -> repeat.
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="The generation loop: the text so far goes into the model, the model gives a score for every token, one token is picked and added to the text, and the loop repeats">
+  <defs>
+    <marker id="tl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+    <marker id="tl-arrow-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="tg" /></marker>
+  </defs>
+
+  <rect x="16" y="50" width="150" height="96" rx="12" class="box" />
+  <text x="91" y="78" class="t3 mono" font-size="10.5" text-anchor="middle">STEP 1</text>
+  <text x="91" y="100" class="t" font-size="14" font-weight="700" text-anchor="middle">Text so far</text>
+  <text x="91" y="122" class="t2" font-size="11" text-anchor="middle">prompt + tokens</text>
+  <text x="91" y="136" class="t2" font-size="11" text-anchor="middle">written until now</text>
+
+  <path d="M170 98 H204" class="line-a" stroke-width="1.6" marker-end="url(#tl-arrow)" />
+
+  <rect x="208" y="36" width="160" height="124" rx="12" class="box-a" />
+  <text x="288" y="64" class="ta mono" font-size="10.5" text-anchor="middle">STEP 2</text>
+  <text x="288" y="88" class="t" font-size="14" font-weight="700" text-anchor="middle">The model</text>
+  <text x="288" y="110" class="t2" font-size="11" text-anchor="middle">runs all 32 layers</text>
+  <text x="288" y="124" class="t2" font-size="11" text-anchor="middle">uses every weight</text>
+  <text x="288" y="146" class="ta mono" font-size="11" text-anchor="middle" font-weight="600">heavy GPU work</text>
+
+  <path d="M372 98 H406" class="line-a" stroke-width="1.6" marker-end="url(#tl-arrow)" />
+
+  <rect x="410" y="50" width="140" height="96" rx="12" class="box" />
+  <text x="480" y="78" class="t3 mono" font-size="10.5" text-anchor="middle">STEP 3</text>
+  <text x="480" y="100" class="t" font-size="14" font-weight="700" text-anchor="middle">Scores</text>
+  <text x="480" y="122" class="t2" font-size="11" text-anchor="middle">one score for each</text>
+  <text x="480" y="136" class="t2" font-size="11" text-anchor="middle">of 128,256 tokens</text>
+
+  <path d="M554 98 H588" class="line-a" stroke-width="1.6" marker-end="url(#tl-arrow)" />
+
+  <rect x="592" y="50" width="112" height="96" rx="12" class="box" />
+  <text x="648" y="78" class="t3 mono" font-size="10.5" text-anchor="middle">STEP 4</text>
+  <text x="648" y="100" class="t" font-size="14" font-weight="700" text-anchor="middle">Pick one</text>
+  <text x="648" y="122" class="t2" font-size="11" text-anchor="middle">the next token</text>
+  <text x="648" y="136" class="ta mono" font-size="11" text-anchor="middle">“ Paris”</text>
+
+  <!-- loop back -->
+  <path d="M648 150 V214 H91 V152" class="line-a" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#tl-arrow)" />
+  <rect x="236" y="200" width="250" height="28" rx="14" class="box" />
+  <text x="361" y="219" class="ta" font-size="12" font-weight="600" text-anchor="middle">add the token to the text, repeat</text>
+
+  <!-- stop -->
+  <path d="M704 98 H714 V262 H560" class="sg" stroke-width="1.4" marker-end="url(#tl-arrow-g)" />
+  <rect x="290" y="248" width="266" height="30" rx="8" class="green" />
+  <text x="423" y="268" class="tg" font-size="12" font-weight="600" text-anchor="middle">stop at the “end” token or a length limit</text>
+</svg>
