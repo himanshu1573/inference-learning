@@ -1,0 +1,479 @@
+---
+title: 'Connecting GPUs: PCIe, NVLink and InfiniBand'
+description: 'When one GPU is not enough: how GPUs talk to each other inside a server and between servers, and what that talking costs.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import CgHgxNode from '../../../components/figures/gpu-hardware/CgHgxNode.astro';
+import CgLinkSpeeds from '../../../components/figures/gpu-hardware/CgLinkSpeeds.astro';
+import CgAllReduce from '../../../components/figures/gpu-hardware/CgAllReduce.astro';
+import CgRingAllReduce from '../../../components/figures/gpu-hardware/CgRingAllReduce.astro';
+import CgTensorParallel from '../../../components/figures/gpu-hardware/CgTensorParallel.astro';
+import CgScaleUpOut from '../../../components/figures/gpu-hardware/CgScaleUpOut.astro';
+
+So far, we have looked at one GPU. But many real models are too big for one GPU, and many services need more speed than one GPU can give. Then several GPUs must work on the **same** model, and they must send data to each other many times for every token. In this chapter, we meet the "roads" between GPUs: **PCIe**, **NVLink** and **InfiniBand**. We learn how fast they are, and we calculate what this talking costs during inference.
+
+<NewWords
+  words={[
+    { word: 'Interconnect', meaning: 'The connection (cables, chips, links) that lets GPUs send data to each other.' },
+    { word: 'Bandwidth', meaning: 'How many bytes a link can move per second. Like the number of lanes on a road.' },
+    { word: 'Latency', meaning: 'The fixed delay before data starts to arrive. Like the time to drive from one city to another, even with an empty road.' },
+    { word: 'PCIe', meaning: 'The standard connection inside a computer between the CPU and cards like GPUs and network cards.' },
+    { word: 'NVLink / NVSwitch', meaning: 'NVIDIA links (and switch chips) that connect GPUs directly, much faster than PCIe.' },
+    { word: 'NIC', meaning: 'Network Interface Card. The card that connects a server to the network.' },
+    { word: 'InfiniBand / RoCE', meaning: 'Very fast networks used to connect GPU servers. RoCE is the Ethernet version.' },
+    { word: 'RDMA', meaning: 'Remote Direct Memory Access. One machine reads or writes another machine’s memory without asking its CPU.' },
+    { word: 'All-reduce', meaning: 'A team operation: every GPU gives a list of numbers, and every GPU gets back the sum of all lists.' },
+    { word: 'Tensor parallelism', meaning: 'Splitting each weight matrix across GPUs, so every GPU does part of every layer.' },
+  ]}
+/>
+
+## Why one GPU is not enough
+
+There are two reasons to use more than one GPU for one model.
+
+**Reason 1: memory.** The model may simply not fit.
+
+<Derivation title="Does Llama 3.1 70B fit on one H100?" result="No. The weights alone (about 141 GB) are bigger than one H100 (80 GB). We need at least 2 GPUs, and more to leave room for the KV cache.">
+
+1. Number of parameters and bytes per parameter in BF16.
+
+   $$
+   70.6 \times 10^{9} \times 2 \text{ bytes} \approx 141 \times 10^{9} \text{ bytes} = 141 \text{ GB}
+   $$
+
+2. Memory of one H100.
+
+   $$
+   80 \text{ GB}
+   $$
+
+3. Minimum number of GPUs, just for the weights.
+
+   $$
+   \frac{141}{80} \approx 1.8 \quad\Rightarrow\quad \text{at least } 2 \text{ GPUs}
+   $$
+
+</Derivation>
+
+For Llama 3.1 405B in BF16, the weights are about **810 GB**. Even a full server with 8 H100s has only $8 \times 80 = 640$ GB. So this model needs more than one server (or a smaller number format, see chapter 1.6).
+
+**Reason 2: speed.** In chapter 1.1, we learned that decode speed is limited by how fast the GPU reads its weights. If we split the weights across 8 GPUs, each GPU reads only **1/8** of the weights for each token. All 8 GPUs read at the same time, so the step can be up to about 8× faster. But there is a catch: the GPUs must now **combine their results**, and that needs communication. The rest of this chapter is about this catch.
+
+## Two numbers for every link: bandwidth and latency
+
+Every connection between two chips has two important numbers:
+
+- **Bandwidth:** how many bytes per second it can move once data is flowing.
+- **Latency:** the fixed delay before anything arrives, even for a tiny message.
+
+<Callout type="analogy" title="A highway between two cities">
+
+**Bandwidth** is the number of lanes. More lanes mean more cars per hour. **Latency** is the driving time from one city to the other. Even with 20 lanes and no traffic, the first car still needs one hour to arrive. To send a few cars, the driving time matters most. To send a million cars, the number of lanes matters most.
+
+</Callout>
+
+A simple model for the time to send a message of $S$ bytes over a link with latency $\alpha$ and bandwidth $B$ is:
+
+$$
+T = \alpha + \frac{S}{B}
+$$
+
+<Derivation title="Small message vs big message over the same link" result="For small messages, latency decides the time. For big messages, bandwidth decides it.">
+
+1. Take a fast GPU link with bandwidth $B = 450$ GB/s and assume a latency of $\alpha = 5$ µs (5 millionths of a second; a rough value for a small message).
+
+2. **Small message:** 16 KB (16,384 bytes).
+
+   $$
+   \frac{S}{B} = \frac{16{,}384}{450 \times 10^{9}} \approx 0.036 \ \mu\text{s}
+   $$
+
+   So $T \approx 5 + 0.036 \approx 5$ µs. Almost all of the time is latency.
+
+3. **Big message:** 1 GB.
+
+   $$
+   \frac{S}{B} = \frac{10^{9}}{450 \times 10^{9}} \approx 2.2 \text{ ms} = 2{,}200 \ \mu\text{s}
+   $$
+
+   So $T \approx 2{,}205$ µs. Almost all of the time is bandwidth.
+
+</Derivation>
+
+Keep this in mind. During decode, GPUs often send **many small messages**, so latency can matter more than bandwidth.
+
+## Bits vs bytes: a common trap
+
+GPU memory and GPU links are measured in **gigabytes per second (GB/s)**. Networks are measured in **gigabits per second (Gb/s)**. Notice the small **b**. One byte is 8 bits, so:
+
+$$
+\text{GB/s} = \frac{\text{Gb/s}}{8}
+$$
+
+<Callout type="warning" title="400 Gb/s is only 50 GB/s">
+
+A modern network card is sold as "400G", which means **400 gigabits** per second. That is $400 / 8 = 50$ gigabytes per second. Compare this with the memory inside an H100, about **3,350 GB/s**. The network is about 67× slower than the GPU's own memory. Always check the unit before you compare numbers.
+
+</Callout>
+
+## Inside one server: PCIe
+
+**PCIe** (PCI Express) is the standard road inside every computer. It connects the CPU to graphics cards, network cards and fast SSDs. A PCIe connection is made of **lanes**. A GPU usually uses **16 lanes**, written **x16**. Each new PCIe **generation** doubles the speed per lane.
+
+| PCIe generation | Speed of an x16 connection, one direction (about) | Common in |
+| --- | --- | --- |
+| Gen4 | <span class="num">32 GB/s</span> | A100 servers, many workstations |
+| Gen5 | <span class="num">64 GB/s</span> | H100 and B200 servers |
+| Gen6 | <span class="num">128 GB/s</span> | Newest platforms |
+
+PCIe is good for loading the model from disk, and for talking to the CPU and the network card. But for GPU-to-GPU talk during inference, it is slow: 64 GB/s is about 50× slower than the GPU's own memory. Also, data between two GPUs on PCIe often has to pass through a **PCIe switch** or even through the CPU, which adds latency.
+
+## NVLink and NVSwitch: a private highway for GPUs
+
+To fix this, NVIDIA built **NVLink**: direct links between GPUs, much faster than PCIe. An H100 has **18 NVLink links**. Each link moves about 25 GB/s in each direction.
+
+<Derivation title="NVLink bandwidth of one H100" result="About 450 GB/s in each direction, or 900 GB/s for both directions together: about 7× faster than PCIe Gen5.">
+
+1. Bandwidth in one direction.
+
+   $$
+   18 \text{ links} \times 25 \text{ GB/s} = 450 \text{ GB/s}
+   $$
+
+2. Both directions together (this is the number NVIDIA usually prints).
+
+   $$
+   2 \times 450 = 900 \text{ GB/s}
+   $$
+
+3. Compare with PCIe Gen5 x16 (about 64 GB/s in one direction).
+
+   $$
+   \frac{450}{64} \approx 7
+   $$
+
+</Derivation>
+
+But 18 links are not enough to connect each of 8 GPUs directly to all 7 others at full speed. So the server also has **NVSwitch** chips. Every GPU connects its NVLinks to the NVSwitch chips, and the switches connect every GPU to every other GPU. The result: **any GPU can talk to any other GPU at full NVLink speed**, at the same time.
+
+<Figure n="7.1" title="Inside an 8-GPU server" caption="A typical 8-GPU server (NVIDIA calls the board 'HGX'). The CPUs, network cards (NICs) and GPUs are joined by a tree of PCIe switches. Separately, all 8 GPUs connect to the NVSwitch fabric, which gives every GPU a fast, direct path to every other GPU. Usually there is one 400 Gb/s NIC per GPU for talking to other servers.">
+  <CgHgxNode />
+</Figure>
+
+The newer **Blackwell** GPUs (B200) use **NVLink 5**, which doubles the speed again: about **900 GB/s in each direction, 1.8 TB/s total** per GPU.
+
+<Figure n="7.2" title="How fast are the roads?" caption="One-direction bandwidth of the links in this chapter (approximate vendor numbers). PCIe and the network are tiny next to NVLink, and even NVLink is much slower than the GPU's own HBM memory. Moving data is never free.">
+  <CgLinkSpeeds />
+</Figure>
+
+## Between servers: InfiniBand and RoCE
+
+When a model needs more than one server, the servers talk over a **network**. AI clusters use two main kinds:
+
+- **InfiniBand:** a network built for supercomputers. The current common speed is **NDR, 400 Gb/s** per port.
+- **RoCE** (RDMA over Converged Ethernet): the same ideas on top of normal **Ethernet**, also at 400 Gb/s and more.
+
+Both support **RDMA**: a NIC can write data straight into the memory of a far-away machine, without the CPU of either machine copying it. With NVIDIA's **GPUDirect RDMA**, the NIC can even read and write **GPU memory directly**. Without it, data would go GPU → CPU memory → NIC → network → NIC → CPU memory → GPU, which wastes time.
+
+<Callout type="real">
+
+A typical H100 server has **eight 400 Gb/s NICs**, one for each GPU. Together that is $8 \times 50 = 400$ GB/s per server in each direction. Compare this with NVLink: **one** H100 alone gets 450 GB/s. So the whole server's network is slower than the NVLink of a single GPU.
+
+</Callout>
+
+<Figure n="7.3" title="Scale-up vs scale-out" caption="Scale-up means adding GPUs inside one fast NVLink domain. Scale-out means connecting many servers through the network. Inside the NVLink domain, each GPU has about 9× more bandwidth than over the network (450 vs 50 GB/s), and the latency is also much lower.">
+  <CgScaleUpOut />
+</Figure>
+
+### Bigger NVLink domains: NVL72
+
+Because NVLink is so much faster than the network, NVIDIA made the NVLink domain bigger. In a **GB200 NVL72** rack, **72 Blackwell GPUs** are joined by NVSwitch trays into one NVLink domain. To the software, it looks almost like one giant GPU with 72 parts.
+
+<Derivation title="Total NVLink bandwidth of an NVL72 rack" result="About 130 TB/s of GPU-to-GPU bandwidth inside one rack.">
+
+1. Each Blackwell GPU has about 1.8 TB/s of NVLink bandwidth (both directions).
+
+2. There are 72 GPUs.
+
+   $$
+   72 \times 1.8 \text{ TB/s} \approx 130 \text{ TB/s}
+   $$
+
+</Derivation>
+
+## How GPUs work together: collective operations
+
+When GPUs share one model, they do not just send random messages. They use a few standard **team operations**, called **collective operations** (or just "collectives"). The most important one for inference is **all-reduce**.
+
+In an all-reduce, every GPU starts with its own list of numbers. At the end, **every GPU has the sum** of all the lists.
+
+<Figure n="7.4" title="All-reduce in one picture" caption="Each of the 4 GPUs starts with its own 4 numbers. After the all-reduce, every GPU holds the same 4 numbers: the sum of each column. In tensor parallelism, each GPU computes a part of a result, and the all-reduce adds the parts together.">
+  <CgAllReduce />
+</Figure>
+
+Other collectives you will meet later:
+
+- **All-gather:** every GPU has one piece; at the end, every GPU has all the pieces.
+- **Reduce-scatter:** like all-reduce, but each GPU ends with only one part of the sum.
+- **All-to-all:** every GPU sends a different piece to every other GPU. This is used in Mixture-of-Experts models (Phase 2).
+
+On NVIDIA GPUs, these operations are usually done by a library called **NCCL** (pronounced "nickel"). Serving engines like vLLM call NCCL (or their own faster versions) for you.
+
+## The ring all-reduce: the math
+
+How can 8 GPUs add up their lists without one GPU doing all the work? A classic answer is the **ring all-reduce**. The GPUs are arranged in a circle. Each GPU only talks to its neighbour.
+
+<Figure n="7.5" title="Ring all-reduce with 4 GPUs" caption="The data on each GPU is cut into N chunks. In phase 1 (reduce-scatter), the chunks travel around the ring and get added up, until each GPU owns the full sum of one chunk. In phase 2 (all-gather), the finished chunks travel around the ring again until every GPU has all of them. Each phase takes N − 1 steps.">
+  <CgRingAllReduce />
+</Figure>
+
+<Derivation title="How many bytes does each GPU send in a ring all-reduce?" result="Each GPU sends (and receives) 2(N − 1)/N × S bytes. For large N, this is almost 2S, no matter how many GPUs there are.">
+
+1. Each GPU holds $S$ bytes. We cut them into $N$ chunks, one per GPU.
+
+   $$
+   \text{chunk size} = \frac{S}{N}
+   $$
+
+2. **Phase 1 (reduce-scatter)** takes $N - 1$ steps. In each step, each GPU sends one chunk to its neighbour.
+
+   $$
+   (N - 1) \times \frac{S}{N}
+   $$
+
+3. **Phase 2 (all-gather)** also takes $N - 1$ steps, with one chunk per step.
+
+   $$
+   (N - 1) \times \frac{S}{N}
+   $$
+
+4. Add the two phases.
+
+   $$
+   \text{bytes sent per GPU} = \frac{2(N - 1)}{N} \times S
+   $$
+
+5. Example with $N = 8$ GPUs.
+
+   $$
+   \frac{2 \times 7}{8} = 1.75 \quad\Rightarrow\quad 1.75 \times S
+   $$
+
+</Derivation>
+
+This is a beautiful result: the bytes per GPU **almost do not grow** with more GPUs. But the number of **steps**, $2(N - 1)$, does grow, and each step pays some latency. Putting both together, a simple estimate of the time is:
+
+$$
+T_{\text{all-reduce}} \approx 2(N - 1)\,\alpha + \frac{2(N - 1)}{N} \cdot \frac{S}{B}
+$$
+
+(Real libraries also use other patterns, like trees, and NVSwitch can even do the adding inside the switch. But the ring is the best way to learn the idea.)
+
+## Worked example: tensor parallelism for Llama 3.1 70B
+
+Now let us use everything. We serve Llama 3.1 70B on one 8-GPU H100 server with **tensor parallelism** (TP = 8): every weight matrix is split into 8 parts, one per GPU.
+
+<Figure n="7.6" title="Tensor parallelism in one block (2 GPUs shown)" caption="The first matrix A is split by columns, so each GPU computes its own part Y without talking. The second matrix B is split by rows, so each GPU gets a partial result Z. One all-reduce adds the partial results. With 8 GPUs it works the same way, with 8 parts.">
+  <CgTensorParallel />
+</Figure>
+
+Each transformer layer has two such blocks (attention and MLP), so it needs **2 all-reduces per layer**. Llama 3.1 70B has **80 layers**, and its hidden size (the length of the vector for each token) is **8,192**.
+
+<Derivation title="All-reduce traffic for one decode step, batch of 1 user" result="About 28.7 KB per all-reduce and 160 all-reduces per token. Bandwidth time is tiny (about 10 µs on NVLink), but latency adds up to roughly 0.8 ms.">
+
+1. Number of all-reduces per decode step.
+
+   $$
+   2 \times 80 = 160
+   $$
+
+2. Size of one all-reduce: one vector of 8,192 numbers in BF16 (2 bytes each), for 1 user.
+
+   $$
+   S = 1 \times 8{,}192 \times 2 = 16{,}384 \text{ bytes} \approx 16 \text{ KB}
+   $$
+
+3. Bytes each GPU sends (ring, $N = 8$).
+
+   $$
+   1.75 \times 16{,}384 \approx 28{,}700 \text{ bytes}
+   $$
+
+4. Bandwidth time on NVLink (450 GB/s), for all 160 all-reduces.
+
+   $$
+   160 \times \frac{28{,}700}{450 \times 10^{9}} \approx 160 \times 0.064 \ \mu\text{s} \approx 10 \ \mu\text{s}
+   $$
+
+5. Latency time, if each small all-reduce costs about 5 µs (a rough, optimistic value on NVLink).
+
+   $$
+   160 \times 5 \ \mu\text{s} = 800 \ \mu\text{s} = 0.8 \text{ ms}
+   $$
+
+6. Compare with the time to read the weights. Each GPU holds 1/8 of 141 GB.
+
+   $$
+   \frac{141 / 8 \text{ GB}}{3.35 \text{ TB/s}} = \frac{17.6 \times 10^{9}}{3.35 \times 10^{12}} \approx 5.3 \text{ ms}
+   $$
+
+</Derivation>
+
+So with one user, the communication **bandwidth** is not a problem at all. The **latency** of 160 small messages is the real cost: it adds about 15% to the step time. This is why serving engines work hard on fast, low-latency all-reduce code.
+
+Now let us serve **64 users together** (a batch of 64). Each all-reduce now carries 64 vectors.
+
+<Derivation title="All-reduce traffic for one decode step, batch of 64 users" result="On NVLink, about 0.65 ms per step: fine. On PCIe Gen5, about 4.6 ms per step: almost as long as reading the weights.">
+
+1. Size of one all-reduce.
+
+   $$
+   S = 64 \times 8{,}192 \times 2 = 1{,}048{,}576 \text{ bytes} \approx 1.05 \text{ MB}
+   $$
+
+2. Bytes each GPU sends.
+
+   $$
+   1.75 \times 1.05 \text{ MB} \approx 1.84 \text{ MB}
+   $$
+
+3. Over **NVLink** (450 GB/s), for 160 all-reduces.
+
+   $$
+   160 \times \frac{1.84 \times 10^{6}}{450 \times 10^{9}} \approx 160 \times 4.1 \ \mu\text{s} \approx 0.65 \text{ ms}
+   $$
+
+4. Over **PCIe Gen5** (64 GB/s), for 160 all-reduces.
+
+   $$
+   160 \times \frac{1.84 \times 10^{6}}{64 \times 10^{9}} \approx 160 \times 28.7 \ \mu\text{s} \approx 4.6 \text{ ms}
+   $$
+
+5. Over the **network** (50 GB/s per GPU), for 160 all-reduces, before adding the higher network latency.
+
+   $$
+   160 \times \frac{1.84 \times 10^{6}}{50 \times 10^{9}} \approx 160 \times 36.8 \ \mu\text{s} \approx 5.9 \text{ ms}
+   $$
+
+</Derivation>
+
+| Link | Batch 1 | Batch 64 | Effect at batch 64 |
+| --- | --- | --- | --- |
+| NVLink 4 | <span class="num">~0.01 ms</span> | <span class="num">~0.65 ms</span> | small |
+| PCIe Gen5 | <span class="num">~0.07 ms</span> | <span class="num">~4.6 ms</span> | almost doubles the step |
+| Network | <span class="num">~0.09 ms</span> | <span class="num">~5.9 ms</span> | more than doubles it |
+
+The table shows the bandwidth time of all 160 all-reduces in one decode step. For comparison, reading the weights takes about 5.3 ms per step.
+
+These numbers do not include latency, which makes PCIe and the network look even worse.
+
+<KeyNumbers
+  items={[
+    { value: '160', label: 'all-reduces per token for Llama 3.1 70B (80 layers × 2)' },
+    { value: '16 KB', label: 'size of each all-reduce for one user' },
+    { value: '1.75 × S', label: 'bytes each GPU sends in a ring all-reduce of 8 GPUs' },
+    { value: '~9×', label: 'more bandwidth per GPU on NVLink than on the network' },
+  ]}
+/>
+
+## Rules of thumb for splitting a model
+
+From this example, we get the most important rule of multi-GPU inference:
+
+<Callout type="idea" title="Keep the chatty work on the fast road">
+
+**Tensor parallelism** talks a lot: 2 all-reduces in every layer, for every token. So keep it **inside one NVLink domain** (usually inside one server). For splitting across servers, use methods that talk much less.
+
+</Callout>
+
+There are other ways to split a model. We cover them in detail in Phase 3, but here is the short version:
+
+| Method | What is split | How often GPUs talk | Where to use it |
+| --- | --- | --- | --- |
+| Tensor parallelism | Every matrix, across GPUs | 2 all-reduces per layer, every token | Inside an NVLink domain |
+| Pipeline parallelism | Groups of layers (GPU 1 has layers 1–40, GPU 2 has 41–80) | Once per group boundary, per step | Across servers |
+| Data parallelism | Nothing: each GPU group has a full copy | Almost never during inference | Anywhere, to serve more users |
+| Expert parallelism | The experts of a MoE model | All-to-all in each MoE layer | NVLink domain, or a fast network |
+
+For example, with **pipeline parallelism** across 2 servers, the only message per decode step is the 16 KB vector (for one user) passed from the last layer on server 1 to the first layer on server 2. That is **1 message instead of 160**. This is why serving the 405B model on two 8-GPU servers often uses TP = 8 inside each server and PP = 2 across them.
+
+<DeepDive title="Why exactly two all-reduces per layer?">
+
+Tensor parallelism in transformers is usually done in the "Megatron" style. It uses a nice fact about matrix multiplication.
+
+**Split by columns: no talking needed.** Take an input $X$ and a weight matrix $A$. Cut $A$ into two halves by **columns**: $A = [A_1 \; A_2]$. Then:
+
+$$
+X A = X [A_1 \; A_2] = [X A_1 \;\; X A_2]
+$$
+
+GPU 0 computes $Y_1 = X A_1$ and GPU 1 computes $Y_2 = X A_2$. Each GPU only needs the full input $X$ and its own half of $A$. No communication.
+
+**Split by rows: one sum needed.** Now the next matrix $B$ is cut by **rows**: $B = \begin{bmatrix} B_1 \\ B_2 \end{bmatrix}$. Then:
+
+$$
+[Y_1 \;\; Y_2] \begin{bmatrix} B_1 \\ B_2 \end{bmatrix} = Y_1 B_1 + Y_2 B_2
+$$
+
+GPU 0 computes $Z_1 = Y_1 B_1$ with the data it already has, and GPU 1 computes $Z_2 = Y_2 B_2$. But the real answer is the **sum** $Z_1 + Z_2$. Adding the parts across GPUs is exactly an **all-reduce**.
+
+**In a transformer layer:**
+
+- In the **MLP block**, the first matrices (gate and up projections) are split by columns, and the down projection is split by rows → **1 all-reduce**.
+- In the **attention block**, the Q, K and V projections are split by columns (each GPU gets some of the attention heads), and the output projection is split by rows → **1 all-reduce**.
+
+That gives 2 all-reduces per layer. Everything in between (activation functions, attention for each head) happens on each GPU alone, because each GPU has whole heads and whole columns.
+
+**Faster tricks.** NVSwitch chips from the H100 generation can do the adding **inside the switch** (NVIDIA calls this NVLink SHARP). Then each GPU sends its data into the switch once and gets the sum back once, instead of passing chunks around a ring. This cuts the traffic per GPU roughly in half, and also cuts the number of steps. Serving engines also use "custom all-reduce" code that is faster than NCCL for the small messages of decode.
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="A network card is sold as 800G. How many gigabytes per second is that?">
+
+800 gigabits per second divided by 8 bits per byte = **100 GB/s**.
+
+</Quiz>
+
+<Quiz n={2} q="What is the difference between bandwidth and latency? Which one matters more for the all-reduces in single-user decode?">
+
+Bandwidth is how many bytes per second a link can move. Latency is the fixed delay before data arrives. In single-user decode, each all-reduce is small (about 16 KB for Llama 3.1 70B), so **latency** matters more.
+
+</Quiz>
+
+<Quiz n={3} q="In a ring all-reduce with N = 4 GPUs, how many bytes does each GPU send if each holds S = 8 MB?">
+
+$\frac{2(N-1)}{N} \times S = \frac{2 \times 3}{4} \times 8 = 1.5 \times 8 = 12$ MB.
+
+</Quiz>
+
+<Quiz n={4} q="Why should tensor parallelism stay inside one NVLink domain?">
+
+Because it needs 2 all-reduces in every layer, for every token (160 per token for an 80-layer model). Over PCIe or the network, these messages take much longer (lower bandwidth and higher latency), and the GPUs spend a large part of each step waiting for each other.
+
+</Quiz>
+
+<Quiz n={5} q="You serve Llama 3.1 70B with tensor parallelism on 8 GPUs. You double the batch from 64 to 128 users. What happens to the size of each all-reduce?">
+
+It doubles, from about 1 MB to about 2 MB, because each all-reduce carries one 8,192-number vector per user. On NVLink this is still fine. On PCIe, the communication time would now be longer than the time to read the weights.
+
+</Quiz>
+
+<Takeaways>
+
+- Use several GPUs when the model **does not fit** in one GPU, or when you need **more speed**. Splitting the weights also splits the memory reading.
+- Every link has **bandwidth** (bytes per second) and **latency** (fixed delay): $T = \alpha + S/B$. Watch out: networks use **Gb/s**, so 400 Gb/s = 50 GB/s.
+- **PCIe** Gen5 is about 64 GB/s each way. **NVLink** on H100 is about 450 GB/s each way, with **NVSwitch** connecting all 8 GPUs. Servers connect with **InfiniBand or RoCE** at about 50 GB/s per GPU.
+- In a **ring all-reduce**, each GPU sends $\frac{2(N-1)}{N} \times S$ bytes in $2(N-1)$ steps.
+- **Tensor parallelism** needs 2 all-reduces per layer per token, so keep it inside an NVLink domain. Use **pipeline** or **data parallelism** across servers.
+
+</Takeaways>
