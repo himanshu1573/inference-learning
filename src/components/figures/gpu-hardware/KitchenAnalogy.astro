@@ -1,0 +1,35 @@
+---
+// The memory hierarchy as a kitchen: hands, cutting board, shelf, fridge, shop, warehouse.
+const items = [
+  { k: 'Your hands', m: 'Registers', a: 'hold 1–2 things', b: 'instant' },
+  { k: 'Cutting board', m: 'Shared memory', a: 'a few things', b: 'very quick' },
+  { k: 'Kitchen shelf', m: 'L2 cache', a: 'more space', b: 'a few steps' },
+  { k: 'Big fridge', m: 'HBM', a: 'food for the week', b: 'walk across' },
+  { k: 'Shop nearby', m: 'CPU memory', a: 'huge choice', b: 'a trip out' },
+  { k: 'Warehouse', m: 'SSD', a: 'everything', b: 'a long drive' },
+];
+---
+<svg viewBox="0 0 720 236" role="img" aria-label="Kitchen analogy: hands are registers, cutting board is shared memory, shelf is L2 cache, fridge is HBM, shop is CPU memory, warehouse is SSD">
+  <defs>
+    <marker id="ka-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="t3" /></marker>
+  </defs>
+  {items.map((it, i) => {
+    const x = 21 + i * 114;
+    return (
+      <g>
+        <rect x={x} y="24" width="108" height="138" rx="10" class={i < 3 ? 'box-a' : i === 3 ? 'teal' : 'box'} />
+        <text x={x + 54} y="46" class="t3 mono" font-size="9.5" text-anchor="middle" letter-spacing="1">KITCHEN</text>
+        <text x={x + 54} y="68" class="t" font-size="12.5" font-weight="700" text-anchor="middle">{it.k}</text>
+        <line x1={x + 12} y1="82" x2={x + 96} y2="82" class="line" stroke-dasharray="3 3" />
+        <text x={x + 54} y="102" class="t3 mono" font-size="9.5" text-anchor="middle" letter-spacing="1">GPU</text>
+        <text x={x + 54} y="120" class={i === 3 ? 'tt' : 'ta'} font-size="12" font-weight="700" text-anchor="middle">{it.m}</text>
+        <text x={x + 54} y="140" class="t2" font-size="10.5" text-anchor="middle">{it.a}</text>
+        <text x={x + 54} y="154" class="t3" font-size="10.5" text-anchor="middle">{it.b}</text>
+      </g>
+    );
+  })}
+  <path d="M30 192 H690" class="line-t" stroke-width="1.2" marker-end="url(#ka-arrow)" />
+  <path d="M690 192 H30" class="line-t" stroke-width="1.2" marker-end="url(#ka-arrow)" />
+  <text x="30" y="214" class="ta" font-size="12" font-weight="600">small · fast · close</text>
+  <text x="690" y="214" class="t2" font-size="12" font-weight="600" text-anchor="end">big · slow · far away</text>
+</svg>

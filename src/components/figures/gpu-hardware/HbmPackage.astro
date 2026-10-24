@@ -1,0 +1,50 @@
+---
+// HBM: memory stacks placed right next to the GPU die on a silicon interposer.
+const layers = [0, 1, 2, 3, 4, 5, 6, 7];
+---
+<svg viewBox="0 0 720 290" role="img" aria-label="Top view: the GPU die in the middle with HBM stacks on both sides on one silicon interposer. Side view: a stack of 8 DRAM chips on a base die, connected to the GPU by about a thousand short wires">
+  <defs>
+    <marker id="hbm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <!-- top view -->
+  <text x="20" y="24" class="t" font-size="13" font-weight="700">Top view of the GPU package</text>
+  <rect x="20" y="40" width="320" height="200" rx="10" class="box2" />
+  <rect x="125" y="70" width="110" height="140" rx="8" class="box-a" stroke-width="1.5" />
+  <text x="180" y="132" class="ta" font-size="14" font-weight="700" text-anchor="middle">GPU die</text>
+  <text x="180" y="152" class="t2" font-size="11" text-anchor="middle">132 SMs, L2</text>
+  {[0, 1, 2].map((i) => (
+    <g>
+      <rect x="40" y={66 + i * 52} width="68" height="42" rx="6" class="teal" />
+      <text x="74" y={92 + i * 52} class="tt" font-size="11.5" font-weight="700" text-anchor="middle">HBM</text>
+      <rect x="252" y={66 + i * 52} width="68" height="42" rx="6" class="teal" />
+      <text x="286" y={92 + i * 52} class="tt" font-size="11.5" font-weight="700" text-anchor="middle">HBM</text>
+    </g>
+  ))}
+  <text x="180" y="232" class="t3" font-size="11" text-anchor="middle">silicon interposer (a thin base that carries the wires)</text>
+  <text x="20" y="262" class="t2" font-size="11">The memory sits millimetres from the chip,</text>
+  <text x="20" y="278" class="t2" font-size="11">not centimetres away on the board.</text>
+
+  <!-- side view -->
+  <text x="380" y="24" class="t" font-size="13" font-weight="700">Side view of one stack</text>
+  <rect x="380" y="226" width="320" height="16" rx="3" class="box2" />
+  <text x="540" y="238" class="t3" font-size="10" text-anchor="middle">interposer</text>
+  <rect x="392" y="160" width="100" height="62" rx="6" class="box-a" stroke-width="1.5" />
+  <text x="442" y="196" class="ta" font-size="13" font-weight="700" text-anchor="middle">GPU</text>
+  <rect x="560" y="208" width="128" height="14" rx="2" class="box" />
+  <text x="624" y="219" class="t3" font-size="9" text-anchor="middle">base (logic) die</text>
+  {layers.map((i) => (
+    <rect x="560" y={192 - i * 15} width="128" height="12" rx="2" class="teal" />
+  ))}
+  {[584, 624, 664].map((x) => (
+    <line x1={x} y1="88" x2={x} y2="204" class="line-t" stroke-dasharray="2 2" stroke-width="1" />
+  ))}
+  <text x="624" y="70" class="tt" font-size="11.5" font-weight="700" text-anchor="middle">8 DRAM chips stacked</text>
+  <text x="624" y="84" class="t3" font-size="10" text-anchor="middle">joined by vertical wires</text>
+  {[0, 1, 2, 3].map((i) => (
+    <path d={`M492 ${206 + i * 4} H560`} class="line-a" stroke-width="1" />
+  ))}
+  <text x="526" y="150" class="ta" font-size="11" font-weight="600" text-anchor="middle">1,024 wires</text>
+  <text x="526" y="164" class="ta" font-size="11" font-weight="600" text-anchor="middle">per stack</text>
+  <path d="M526 170 V200" class="line-a" stroke-width="1.2" marker-end="url(#hbm-arrow)" />
+  <text x="540" y="268" class="t2" font-size="11" text-anchor="middle">Many short, parallel wires = very high bandwidth.</text>
+</svg>

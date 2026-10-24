@@ -1,0 +1,49 @@
+---
+// The GPU memory hierarchy as a pyramid: small and fast at the top, big and slow at the bottom.
+// Rough numbers for an NVIDIA H100 SXM server.
+const rows = [
+  { name: 'Registers', size: '256 KB per SM', bw: 'fastest', lat: '~1 ns', cls: 'box-a' },
+  { name: 'Shared mem / L1', size: '256 KB per SM', bw: '~33 TB/s total', lat: '~20 ns', cls: 'box-a' },
+  { name: 'L2 cache', size: '50 MB', bw: '~2× HBM', lat: '~150 ns', cls: 'box-a' },
+  { name: 'HBM3', size: '80 GB', bw: '3.35 TB/s', lat: '~400 ns', cls: 'teal' },
+  { name: 'CPU memory', size: '1–2 TB', bw: '~64 GB/s, PCIe 5', lat: '~1–2 µs', cls: 'box2' },
+  { name: 'NVMe SSD', size: '10+ TB', bw: '~7 GB/s a drive', lat: '~50 µs', cls: 'box2' },
+];
+const cx = 215;
+const y0 = 52;
+const h = 44;
+const wTop = 60;
+const step = 46;
+function trap(i: number) {
+  const wt = wTop + i * step;
+  const wb = wt + step;
+  const y = y0 + i * h;
+  return `M${cx - wt / 2} ${y} H${cx + wt / 2} L${cx + wb / 2} ${y + h - 4} H${cx - wb / 2} Z`;
+}
+---
+<svg viewBox="0 0 720 372" role="img" aria-label="Memory pyramid of a GPU server: registers, shared memory, L2 cache, HBM, CPU memory and SSD, from small and fast to big and slow">
+  <text x="405" y="34" class="t3 mono" font-size="10.5" letter-spacing="1">SIZE</text>
+  <text x="510" y="34" class="t3 mono" font-size="10.5" letter-spacing="1">SPEED</text>
+  <text x="660" y="34" class="t3 mono" font-size="10.5" letter-spacing="1">WAIT</text>
+  {rows.map((r, i) => {
+    const y = y0 + i * h;
+    return (
+      <g>
+        <path d={trap(i)} class={r.cls} stroke-width="1.2" />
+        <text x={cx} y={y + h / 2 + 2} class={i < 3 ? 'ta' : i === 3 ? 'tt' : 't'} font-size="12" font-weight="700" text-anchor="middle">{r.name}</text>
+        <line x1="392" y1={y + h - 2} x2="710" y2={y + h - 2} class="line" stroke-dasharray="2 4" />
+        <text x="405" y={y + h / 2 + 2} class="t mono" font-size="11.5" font-weight="600">{r.size}</text>
+        <text x="510" y={y + h / 2 + 2} class="t2 mono" font-size="11">{r.bw}</text>
+        <text x="660" y={y + h / 2 + 2} class="t2 mono" font-size="11">{r.lat}</text>
+      </g>
+    );
+  })}
+  <!-- legend -->
+  <rect x="40" y="332" width="14" height="10" rx="2" class="box-a" />
+  <text x="60" y="341" class="t2" font-size="11">on the GPU chip</text>
+  <rect x="170" y="332" width="14" height="10" rx="2" class="teal" />
+  <text x="190" y="341" class="t2" font-size="11">next to the chip, same package</text>
+  <rect x="380" y="332" width="14" height="10" rx="2" class="box2" />
+  <text x="400" y="341" class="t2" font-size="11">outside the GPU</text>
+  <text x="40" y="364" class="t3" font-size="10.5">Rough numbers for one NVIDIA H100 SXM and a typical server. Going down: about 10–1000× bigger, but slower to reach.</text>
+</svg>

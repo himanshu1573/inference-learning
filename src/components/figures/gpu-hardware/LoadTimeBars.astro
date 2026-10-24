@@ -1,0 +1,43 @@
+---
+// Time to read 16 GB (Llama 3.1 8B in BF16) from different places. Log scale.
+const rows = [
+  { label: 'GPU HBM (H100, 3.35 TB/s)', t: 0.0048, txt: '4.8 ms', cls: 'fill-a' },
+  { label: 'CPU memory → GPU, PCIe 5 (64 GB/s)', t: 0.25, txt: '0.25 s', cls: 'tt' },
+  { label: 'CPU memory → GPU, PCIe 4 (32 GB/s)', t: 0.5, txt: '0.5 s', cls: 'tt' },
+  { label: 'One NVMe SSD (7 GB/s)', t: 2.3, txt: '2.3 s', cls: 'tam' },
+  { label: 'Network, 10 Gbit/s (1.25 GB/s)', t: 12.8, txt: '12.8 s', cls: 'tr' },
+  { label: 'Network, 1 Gbit/s (0.125 GB/s)', t: 128, txt: '128 s', cls: 'tr' },
+];
+const x0 = 262;
+const w = 380;
+// log scale from 1 ms to 1000 s (6 decades)
+const fx = (t: number) => x0 + ((Math.log10(t) + 3) / 6) * w;
+const ticks = [
+  { t: 0.001, l: '1 ms' },
+  { t: 0.01, l: '10 ms' },
+  { t: 0.1, l: '0.1 s' },
+  { t: 1, l: '1 s' },
+  { t: 10, l: '10 s' },
+  { t: 100, l: '100 s' },
+  { t: 1000, l: '1000 s' },
+];
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Bar chart on a log scale: reading 16 GB takes 4.8 ms from HBM, 0.25 s over PCIe 5, 2.3 s from an SSD and 128 s over a 1 Gbit network">
+  {ticks.map((k) => (
+    <g>
+      <line x1={fx(k.t)} y1="26" x2={fx(k.t)} y2="244" class="line" stroke-dasharray="2 4" />
+      <text x={fx(k.t)} y="262" class="t3 mono" font-size="10.5" text-anchor="middle">{k.l}</text>
+    </g>
+  ))}
+  {rows.map((r, i) => {
+    const y = 34 + i * 35;
+    return (
+      <g>
+        <text x={x0 - 10} y={y + 15} class="t" font-size="11.5" text-anchor="end">{r.label}</text>
+        <rect x={x0} y={y} width={Math.max(4, fx(r.t) - x0)} height="22" rx="4" class={r.cls} />
+        <text x={fx(r.t) + 8} y={y + 15} class="t mono" font-size="11.5" font-weight="700">{r.txt}</text>
+      </g>
+    );
+  })}
+  <text x={x0} y="288" class="t3" font-size="10.5">Log scale: each grid line is 10× more time. Same 16 GB, from 5 milliseconds to 2 minutes.</text>
+</svg>

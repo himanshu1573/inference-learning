@@ -1,0 +1,35 @@
+---
+// Without reuse every number travels from HBM for each use; with reuse it is loaded once into shared memory.
+---
+<svg viewBox="0 0 720 270" role="img" aria-label="Left: without reuse, every use of a number needs a new trip from HBM. Right: with reuse, the number is loaded once into shared memory and then used many times">
+  <defs>
+    <marker id="rd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="tr" /></marker>
+    <marker id="rd-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+    <marker id="rd-arrow-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="tg" /></marker>
+  </defs>
+  <!-- left -->
+  <text x="20" y="24" class="tr" font-size="13" font-weight="700">Without reuse</text>
+  <rect x="20" y="40" width="320" height="40" rx="8" class="box-a" />
+  <text x="180" y="65" class="ta" font-size="12" font-weight="700" text-anchor="middle">math units (Tensor Cores)</text>
+  {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+    <path d={`M${50 + i * 44} 186 V86`} class="sr" stroke-width="1.4" marker-end="url(#rd-arrow)" />
+  ))}
+  <rect x="20" y="190" width="320" height="40" rx="8" class="teal" />
+  <text x="180" y="215" class="tt" font-size="12" font-weight="700" text-anchor="middle">HBM (slow, far)</text>
+  <text x="180" y="254" class="t2" font-size="11" text-anchor="middle">7 uses = 7 slow trips to HBM</text>
+
+  <!-- right -->
+  <text x="380" y="24" class="tg" font-size="13" font-weight="700">With reuse</text>
+  <rect x="380" y="40" width="320" height="40" rx="8" class="box-a" />
+  <text x="540" y="65" class="ta" font-size="12" font-weight="700" text-anchor="middle">math units (Tensor Cores)</text>
+  {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+    <path d={`M${410 + i * 44} 116 V86`} class="sg" stroke-width="1.4" marker-end="url(#rd-arrow-g)" />
+  ))}
+  <rect x="380" y="118" width="320" height="34" rx="8" class="box-a" stroke-dasharray="4 3" />
+  <text x="540" y="140" class="ta" font-size="11.5" font-weight="700" text-anchor="middle">shared memory (fast, on chip)</text>
+  <path d="M540 186 V158" class="line-a" stroke-width="3" marker-end="url(#rd-arrow-a)" />
+  <text x="552" y="176" class="ta" font-size="11" font-weight="600">load once</text>
+  <rect x="380" y="190" width="320" height="40" rx="8" class="teal" />
+  <text x="540" y="215" class="tt" font-size="12" font-weight="700" text-anchor="middle">HBM (slow, far)</text>
+  <text x="540" y="254" class="t2" font-size="11" text-anchor="middle">7 uses = 1 slow trip + 7 fast reads</text>
+</svg>
