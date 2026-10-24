@@ -1,0 +1,39 @@
+---
+// CUDA core: one multiply-add per clock. Tensor Core: a whole small tile per clock.
+function grid(x: number, y: number, rows: number, cols: number, cell: number, cls: string) {
+  const out: { x: number; y: number; cls: string }[] = [];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) out.push({ x: x + c * cell, y: y + r * cell, cls });
+  return out;
+}
+const A = grid(268, 92, 8, 16, 9, 'box-a');
+const B = grid(446, 56, 16, 4, 9, 'box-a');
+const D = grid(580, 92, 8, 4, 9, 'fill-a');
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="A CUDA core does one multiply and one add per clock: 2 FLOPs. A Tensor Core multiplies a whole small tile of numbers per clock: 512 multiply-adds, which is 1,024 FLOPs.">
+  <!-- CUDA core -->
+  <text x="20" y="26" class="t" font-size="13" font-weight="700">CUDA core</text>
+  <text x="20" y="43" class="t3" font-size="11">one number at a time</text>
+  <rect x="20" y="70" width="200" height="120" rx="10" class="box" />
+  <text x="120" y="118" class="t mono" font-size="16" text-anchor="middle">a × b + c</text>
+  <text x="120" y="146" class="t2" font-size="11" text-anchor="middle">1 multiply-add per clock</text>
+  <text x="120" y="170" class="ta mono" font-size="12" font-weight="700" text-anchor="middle">= 2 FLOPs</text>
+
+  <!-- Tensor core -->
+  <text x="268" y="26" class="t" font-size="13" font-weight="700">Tensor Core</text>
+  <text x="268" y="43" class="t3" font-size="11">a whole tile at a time</text>
+  {A.map((c) => <rect x={c.x} y={c.y} width="7.5" height="7.5" rx="1" class={c.cls} stroke-width="0.5" />)}
+  <text x="340" y="180" class="t2 mono" font-size="10.5" text-anchor="middle">A: 8 × 16</text>
+  <text x="428" y="132" class="t2" font-size="18" text-anchor="middle">×</text>
+  {B.map((c) => <rect x={c.x} y={c.y} width="7.5" height="7.5" rx="1" class={c.cls} stroke-width="0.5" />)}
+  <text x="463" y="214" class="t2 mono" font-size="10.5" text-anchor="middle">B: 16 × 4</text>
+  <text x="502" y="132" class="t2" font-size="14" text-anchor="middle">+ C</text>
+  <text x="550" y="132" class="t2" font-size="18" text-anchor="middle">=</text>
+  {D.map((c) => <rect x={c.x} y={c.y} width="7.5" height="7.5" rx="1" class={c.cls} />)}
+  <text x="597" y="180" class="t2 mono" font-size="10.5" text-anchor="middle">D: 8 × 4</text>
+
+  <rect x="268" y="236" width="436" height="48" rx="10" class="box-a" />
+  <text x="486" y="256" class="ta" font-size="12" font-weight="700" text-anchor="middle">8 × 16 × 4 = 512 multiply-adds per clock</text>
+  <text x="486" y="274" class="t2" font-size="11" text-anchor="middle">= 1,024 FLOPs per clock (H100, FP16/BF16) · about 512× one CUDA core</text>
+  <text x="120" y="262" class="t3" font-size="10.5" text-anchor="middle">Tile shape shown is an example of</text>
+  <text x="120" y="278" class="t3" font-size="10.5" text-anchor="middle">the amount of work, not the exact shape.</text>
+</svg>
