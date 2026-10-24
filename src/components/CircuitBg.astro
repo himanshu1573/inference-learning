@@ -48,6 +48,12 @@ const { variant = 'hero' } = Astro.props;
     pointer-events: none;
     z-index: 0;
   }
+  /* Fade the traces out in the middle so they never cross the hero text. */
+  .circuit.hero,
+  .circuit.cta {
+    -webkit-mask-image: radial-gradient(ellipse 34% 46% at 50% 50%, transparent 55%, #000 100%);
+    mask-image: radial-gradient(ellipse 34% 46% at 50% 50%, transparent 55%, #000 100%);
+  }
   .traces { stroke: var(--trace); }
   .nodes circle { fill: var(--node); opacity: 0.7; }
   .glow circle { fill: var(--node); opacity: 0.12; animation: glow 3.2s ease-in-out infinite; }

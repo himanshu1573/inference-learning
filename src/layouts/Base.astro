@@ -24,7 +24,7 @@ const fullTitle = title === 'The LLM Inference Book' ? title : `${title} · The 
     <script is:inline>
       (function () {
         var t;
-        try { t = localStorage.getItem('llmbook-theme'); } catch (e) {}
+        try { t = new URLSearchParams(location.search).get('theme') || localStorage.getItem('llmbook-theme'); } catch (e) {}
         if (t !== 'light' && t !== 'dark' && t !== 'reading') {
           t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         }
