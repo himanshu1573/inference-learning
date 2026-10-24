@@ -1,0 +1,509 @@
+---
+// Interactive sampling: a fixed toy next-token distribution for "My favourite food is".
+// Pipeline: logits / temperature -> top-k -> top-p -> renormalise -> draw.
+// Temperature 0 means greedy (always the highest score).
+const tokens = [
+  { t: ' pizza', l: 4.2 },
+  { t: ' pasta', l: 3.6 },
+  { t: ' sushi', l: 3.1 },
+  { t: ' chocolate', l: 2.7 },
+  { t: ' rice', l: 2.2 },
+  { t: ' curry', l: 2.0 },
+  { t: ' ice', l: 1.5 },
+  { t: ' anything', l: 0.9 },
+  { t: ' tacos', l: 0.6 },
+  { t: ' broccoli', l: -0.5 },
+];
+---
+<div class="smp card" data-sampling-playground data-tokens={JSON.stringify(tokens)}>
+  <div class="smp-head">
+    <div class="smp-title">
+      <strong>Sampling playground</strong>
+      <span class="live-pill">live</span>
+    </div>
+    <div class="smp-presets" role="group" aria-label="Presets">
+      <button type="button" data-preset="greedy">Greedy</button>
+      <button type="button" data-preset="balanced">Balanced</button>
+      <button type="button" data-preset="creative">Creative</button>
+    </div>
+  </div>
+  <p class="smp-sub">Prompt: <b>My favourite food is</b> · a toy list of 10 tokens (a real model scores all 128,256)</p>
+
+  <div class="smp-body">
+    <div class="smp-controls">
+      <label class="smp-field">
+        <span class="smp-row"><span class="smp-label">Temperature</span><span class="smp-val"><b data-out="temp"></b></span></span>
+        <input type="range" data-in="temp" min="0" max="2" step="0.05" value="1" />
+        <span class="smp-scale"><span>0 · greedy</span><span>2 · wild</span></span>
+      </label>
+      <label class="smp-field">
+        <span class="smp-row"><span class="smp-label">Top-k</span><span class="smp-val"><b data-out="topk"></b></span></span>
+        <input type="range" data-in="topk" min="1" max="10" step="1" value="10" />
+        <span class="smp-scale"><span>1</span><span>10 · off</span></span>
+      </label>
+      <label class="smp-field">
+        <span class="smp-row"><span class="smp-label">Top-p</span><span class="smp-val"><b data-out="topp"></b></span></span>
+        <input type="range" data-in="topp" min="0.05" max="1" step="0.05" value="1" />
+        <span class="smp-scale"><span>0.05</span><span>1.0 · off</span></span>
+      </label>
+      <div class="smp-facts">
+        <div><span>Tokens kept</span><b data-out="kept"></b></div>
+        <div><span>Top chance</span><b data-out="top"></b></div>
+      </div>
+    </div>
+
+    <div class="smp-chart" data-chart role="img" aria-label="Probability of each token after temperature and filters"></div>
+  </div>
+
+  <div class="smp-draw">
+    <button type="button" class="btn btn-primary btn-sm" data-act="one">Sample 1 token</button>
+    <button type="button" class="btn btn-ghost btn-sm" data-act="twenty">Sample 20</button>
+    <button type="button" class="btn btn-ghost btn-sm" data-act="reset">Reset</button>
+    <span class="smp-seed mono">seed <b data-out="seed"></b></span>
+  </div>
+  <div class="smp-history" data-history aria-live="polite"><span class="smp-empty">Press “Sample” to draw tokens. Each draw is random, but the bars tell you how likely each token is.</span></div>
+  <p class="smp-note">Order of steps here: temperature, then top-k, then top-p, then renormalise. Grey bars are tokens the filters removed. The pale bar behind each blue bar shows its chance before filtering.</p>
+</div>
+
+<script>
+  type Tok = { t: string; l: number };
+
+  // Small, fast seeded random number generator (mulberry32).
+  function rng(seed: number) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function setFill(input: HTMLInputElement) {
+    const min = Number(input.min), max = Number(input.max), v = Number(input.value);
+    input.style.setProperty('--fill', `${((v - min) / (max - min)) * 100}%`);
+  }
+
+  function softmax(logits: number[], temp: number) {
+    if (temp <= 0) {
+      const best = logits.indexOf(Math.max(...logits));
+      return logits.map((_, i) => (i === best ? 1 : 0));
+    }
+    const scaled = logits.map((l) => l / temp);
+    const m = Math.max(...scaled);
+    const ex = scaled.map((s) => Math.exp(s - m));
+    const sum = ex.reduce((a, b) => a + b, 0);
+    return ex.map((e) => e / sum);
+  }
+
+  function init(root: HTMLElement) {
+    const tokens: Tok[] = JSON.parse(root.dataset.tokens || '[]');
+    const q = <T extends Element>(sel: string) => root.querySelector<T>(sel)!;
+    const out = (n: string) => q<HTMLElement>(`[data-out="${n}"]`);
+    const tempIn = q<HTMLInputElement>('[data-in="temp"]');
+    const kIn = q<HTMLInputElement>('[data-in="topk"]');
+    const pIn = q<HTMLInputElement>('[data-in="topp"]');
+    const chart = q<HTMLElement>('[data-chart]');
+    const history = q<HTMLElement>('[data-history]');
+    let seed = 42;
+    let next = rng(seed);
+    let draws: string[] = [];
+    let final: number[] = [];
+
+    function compute() {
+      const temp = Number(tempIn.value);
+      const k = Number(kIn.value);
+      const p = Number(pIn.value);
+      const base = softmax(tokens.map((t) => t.l), temp);
+      const order = base.map((v, i) => i).sort((a, b) => base[b] - base[a]);
+      const keep = new Array(tokens.length).fill(false);
+      let cum = 0;
+      order.forEach((idx, rank) => {
+        if (rank >= k) return;
+        // top-p: keep tokens until the running sum reaches p (always keep the first)
+        if (rank === 0 || cum < p - 1e-9) {
+          keep[idx] = true;
+          cum += base[idx];
+        }
+      });
+      const kept = base.map((v, i) => (keep[i] ? v : 0));
+      const sum = kept.reduce((a, b) => a + b, 0);
+      final = kept.map((v) => v / sum);
+      return { base, keep, temp, k, p };
+    }
+
+    function render() {
+      const { base, keep, temp, k, p } = compute();
+      out('temp').textContent = temp === 0 ? '0 (greedy)' : temp.toFixed(2);
+      out('topk').textContent = k >= tokens.length ? 'off' : String(k);
+      out('topp').textContent = p >= 1 ? 'off' : p.toFixed(2);
+      out('kept').textContent = `${keep.filter(Boolean).length} of ${tokens.length}`;
+      out('top').textContent = `${(Math.max(...final) * 100).toFixed(1)}%`;
+      out('seed').textContent = String(seed);
+      [tempIn, kIn, pIn].forEach(setFill);
+
+      chart.replaceChildren();
+      tokens.forEach((tok, i) => {
+        const row = document.createElement('div');
+        row.className = 'smp-bar' + (keep[i] ? '' : ' is-off');
+        const label = document.createElement('span');
+        label.className = 'smp-tok';
+        label.textContent = tok.t.replace(/^ /, '␣');
+        const track = document.createElement('span');
+        track.className = 'smp-track';
+        const ghost = document.createElement('span');
+        ghost.className = 'smp-ghost';
+        ghost.style.width = `${base[i] * 100}%`;
+        const fill = document.createElement('span');
+        fill.className = 'smp-fill';
+        fill.style.width = `${final[i] * 100}%`;
+        track.append(ghost, fill);
+        const pct = document.createElement('span');
+        pct.className = 'smp-pct';
+        pct.textContent = keep[i] ? `${(final[i] * 100).toFixed(1)}%` : 'removed';
+        row.append(label, track, pct);
+        chart.append(row);
+      });
+    }
+
+    function draw(n: number) {
+      for (let j = 0; j < n; j++) {
+        const r = next();
+        let acc = 0;
+        let pick = final.length - 1;
+        for (let i = 0; i < final.length; i++) {
+          acc += final[i];
+          if (r < acc) {
+            pick = i;
+            break;
+          }
+        }
+        draws.push(tokens[pick].t);
+      }
+      paintHistory();
+    }
+
+    function paintHistory() {
+      history.replaceChildren();
+      if (!draws.length) {
+        const e = document.createElement('span');
+        e.className = 'smp-empty';
+        e.textContent = 'Press “Sample” to draw tokens. Each draw is random, but the bars tell you how likely each token is.';
+        history.append(e);
+        return;
+      }
+      const counts = new Map<string, number>();
+      draws.forEach((d) => counts.set(d, (counts.get(d) || 0) + 1));
+      const last = document.createElement('div');
+      last.className = 'smp-last';
+      last.innerHTML = '';
+      const lead = document.createElement('span');
+      lead.textContent = 'My favourite food is';
+      const pick = document.createElement('b');
+      pick.textContent = draws[draws.length - 1];
+      last.append(lead, pick);
+      const chips = document.createElement('div');
+      chips.className = 'smp-chips';
+      [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .forEach(([t, c]) => {
+          const chip = document.createElement('span');
+          chip.className = 'tag';
+          chip.textContent = `${t.trim()} × ${c}`;
+          chips.append(chip);
+        });
+      const total = document.createElement('span');
+      total.className = 'smp-total mono';
+      total.textContent = `${draws.length} draws`;
+      chips.append(total);
+      history.append(last, chips);
+    }
+
+    const presets: Record<string, [number, number, number]> = {
+      greedy: [0, 10, 1],
+      balanced: [0.7, 10, 0.9],
+      creative: [1.3, 10, 1],
+    };
+    root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const [t, k, p] = presets[b.dataset.preset!];
+        tempIn.value = String(t);
+        kIn.value = String(k);
+        pIn.value = String(p);
+        render();
+      }),
+    );
+    [tempIn, kIn, pIn].forEach((i) => i.addEventListener('input', render));
+    q<HTMLButtonElement>('[data-act="one"]').addEventListener('click', () => draw(1));
+    q<HTMLButtonElement>('[data-act="twenty"]').addEventListener('click', () => draw(20));
+    q<HTMLButtonElement>('[data-act="reset"]').addEventListener('click', () => {
+      seed = (seed * 7 + 13) % 1000;
+      next = rng(seed);
+      draws = [];
+      paintHistory();
+      render();
+    });
+    render();
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-sampling-playground]').forEach(init);
+</script>
+
+<style is:global>
+  .smp {
+    margin: 2.2em 0;
+    padding: 18px 20px 16px;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .smp-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .smp-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+  }
+  .smp-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .smp-presets button {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 4px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-2);
+    cursor: pointer;
+  }
+  .smp-presets button:hover {
+    border-color: var(--accent);
+    color: var(--accent-text);
+  }
+  .smp-sub {
+    margin: 6px 0 14px !important;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  .smp-sub b {
+    color: var(--text);
+  }
+  .smp-body {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .smp-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .smp-field {
+    display: block;
+    padding: 10px 12px 6px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .smp-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .smp-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-2);
+  }
+  .smp-val {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .smp-val b {
+    font-size: 14px;
+    color: var(--text);
+  }
+  .smp-scale {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-3);
+  }
+  .smp-facts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .smp-facts div {
+    display: flex;
+    flex-direction: column;
+    padding: 7px 10px;
+    border-radius: 8px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+  }
+  .smp-facts span {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .smp-facts b {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--accent-text);
+  }
+  .smp-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .smp-bar {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr) 62px;
+    align-items: center;
+    gap: 8px;
+  }
+  .smp-tok {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .smp-track {
+    position: relative;
+    height: 16px;
+    border-radius: 4px;
+    background: var(--surface-3);
+    overflow: hidden;
+  }
+  .smp-ghost,
+  .smp-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: 4px;
+    transition: width 0.2s ease;
+  }
+  .smp-ghost {
+    background: var(--accent-soft);
+  }
+  .smp-fill {
+    background: var(--accent);
+  }
+  .smp-pct {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent-text);
+    text-align: right;
+  }
+  .smp-bar.is-off .smp-tok {
+    color: var(--text-3);
+    text-decoration: line-through;
+  }
+  .smp-bar.is-off .smp-ghost {
+    background: var(--border-strong);
+    opacity: 0.6;
+  }
+  .smp-bar.is-off .smp-pct {
+    color: var(--text-3);
+  }
+  .smp-draw {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+  }
+  .smp-seed {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .smp-seed b {
+    color: var(--text-2);
+  }
+  .smp-history {
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px dashed var(--border-strong);
+    border-radius: 10px;
+    background: var(--surface-3);
+    min-height: 56px;
+  }
+  .smp-empty {
+    font-size: 12.5px;
+    color: var(--text-3);
+  }
+  .smp-last {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    font-size: 15px;
+    color: var(--text-2);
+  }
+  .smp-last b {
+    color: var(--accent-text);
+    white-space: pre;
+  }
+  .smp-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .smp-total {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-left: 4px;
+  }
+  .smp-note {
+    margin-top: 10px !important;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-3);
+  }
+  @media (max-width: 760px) {
+    .smp-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  @media (max-width: 420px) {
+    .smp {
+      padding: 14px 12px;
+    }
+    .smp-bar {
+      grid-template-columns: 78px minmax(0, 1fr) 54px;
+    }
+    .smp-seed {
+      margin-left: 0;
+    }
+  }
+</style>
