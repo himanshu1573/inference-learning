@@ -1,0 +1,361 @@
+---
+title: 'Embeddings and Positions'
+description: 'How each token ID becomes a vector of 4,096 numbers, how the model knows the order of tokens with RoPE, and how the LM head turns vectors back into scores.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import EmbLookup from '../../../components/figures/inference-fundamentals/EmbLookup.astro';
+import EmbSpace2D from '../../../components/figures/inference-fundamentals/EmbSpace2D.astro';
+import EmbOrderBlind from '../../../components/figures/inference-fundamentals/EmbOrderBlind.astro';
+import EmbRopeRotation from '../../../components/figures/inference-fundamentals/EmbRopeRotation.astro';
+import EmbRopeFreq from '../../../components/figures/inference-fundamentals/EmbRopeFreq.astro';
+import EmbLmHead from '../../../components/figures/inference-fundamentals/EmbLmHead.astro';
+
+After the tokenizer, we have a list of token IDs, like 791, 6864, 315. But an ID is only a name. The number 791 is not "bigger" or "more important" than 315. To do useful math, the model needs a richer description of each token. This chapter explains that description, called an **embedding**, and two other things that sit at the edges of the model: how the model knows **the order** of the tokens, and how it turns its final result back into **one score for every token** in the vocabulary.
+
+<NewWords
+  words={[
+    { word: 'Vector', meaning: 'A list of numbers, like (0.8, 0.6). In LLMs a vector often has thousands of numbers.' },
+    { word: 'Embedding', meaning: 'The vector that describes one token. The model learns it during training.' },
+    { word: 'Embedding table', meaning: 'A big table with one row (one embedding) for every token in the vocabulary.' },
+    { word: 'Hidden size', meaning: 'How many numbers each token vector has inside the model. 4,096 for Llama 3.1 8B.' },
+    { word: 'Cosine similarity', meaning: 'A number from -1 to 1 that says how much two vectors point in the same direction.' },
+    { word: 'Position encoding', meaning: 'Any method that tells the model where each token is in the text.' },
+    { word: 'RoPE', meaning: 'Rotary Position Embedding. It turns pairs of numbers by an angle that depends on the position.' },
+    { word: 'LM head and logits', meaning: 'The last matrix of the model, and the raw scores it gives to every token in the vocabulary.' },
+  ]}
+/>
+
+## From IDs to vectors
+
+The first layer of the model is very simple. It is a big table called the **embedding table**. The table has:
+
+- one **row** for every token in the vocabulary: **128,256 rows** for Llama 3.1,
+- one **column** for every number in a token vector: **4,096 columns** for Llama 3.1 8B. This number is called the **hidden size**.
+
+To "embed" a token, the model takes its ID and **copies that row** of the table. Token 791 gets row 791. That is all. No multiplication, no addition, just a lookup.
+
+<Figure n="3.1" title="The embedding lookup" caption="Each token ID points to one row of the embedding table. The output is one vector of 4,096 numbers per token. Three tokens in, a 3 × 4,096 block of numbers out. The numbers shown are invented examples; real values are learned in training.">
+  <EmbLookup />
+</Figure>
+
+<Derivation title="How much memory and work does the embedding layer need?" result="The table is about 1.05 GB, but each token reads only 8 KB of it and needs no math.">
+
+1. Size of the table: rows × columns × bytes per number (BF16 = 2 bytes).
+
+   $$
+   128{,}256 \times 4{,}096 \times 2 \approx 1.05 \times 10^{9} \text{ bytes} = 1.05 \text{ GB}
+   $$
+
+2. One token reads one row:
+
+   $$
+   4{,}096 \times 2 = 8{,}192 \text{ bytes} = 8 \text{ KB}
+   $$
+
+3. A 1,000-token prompt reads 1,000 rows:
+
+   $$
+   1{,}000 \times 8 \text{ KB} = 8 \text{ MB}
+   $$
+
+   That is tiny next to the 16 GB of weights that the rest of the model reads in every step.
+
+</Derivation>
+
+So the embedding table takes a lot of **memory**, but almost no **time**. Remember this. At the other end of the model there is a table of the same size, and there the story is very different.
+
+## What do the numbers mean?
+
+Why use 4,096 numbers to describe a token? Because the model needs room to store a lot of information about it: what it means, what kind of word it is, which topics it belongs to, how it is usually used.
+
+Nobody writes these numbers by hand. They start as random numbers, and **training** slowly moves them. In the end, tokens that are used in similar ways get similar vectors. We can draw a toy version with only 2 numbers per token, so it fits on a page:
+
+<Figure n="3.2" title="A toy picture of an embedding space" caption="In this 2D toy picture, animals sit close together and vehicles sit close together. Also, the step from 'France' to 'Paris' points in the same direction as the step from 'Italy' to 'Rome'. Real embeddings have 4,096 dimensions and their structure is much richer and harder to see, but the idea is the same.">
+  <EmbSpace2D />
+</Figure>
+
+How do we measure "close"? The usual way is **cosine similarity**. It compares the **direction** of two vectors. It is 1 when they point the same way, 0 when they are at a right angle, and -1 when they point in opposite directions.
+
+<Derivation title="Cosine similarity with toy 2D vectors" result="cat and dog: 0.99 (very similar). cat and car: 0.0 (unrelated).">
+
+1. The formula: multiply matching numbers and add them up (this is the **dot product**), then divide by the lengths of both vectors.
+
+   $$
+   \cos(a, b) = \frac{a_1 b_1 + a_2 b_2}{\lvert a \rvert \, \lvert b \rvert}
+   $$
+
+2. Take toy vectors: cat = (0.8, 0.6), dog = (0.7, 0.7), car = (-0.6, 0.8).
+
+3. Lengths: $\lvert \text{cat} \rvert = \sqrt{0.64 + 0.36} = 1$, $\lvert \text{dog} \rvert = \sqrt{0.98} \approx 0.990$, $\lvert \text{car} \rvert = 1$.
+
+4. cat and dog:
+
+   $$
+   \frac{0.8 \times 0.7 + 0.6 \times 0.7}{1 \times 0.990} = \frac{0.98}{0.990} \approx 0.99
+   $$
+
+5. cat and car:
+
+   $$
+   \frac{0.8 \times (-0.6) + 0.6 \times 0.8}{1 \times 1} = \frac{-0.48 + 0.48}{1} = 0
+   $$
+
+</Derivation>
+
+The **dot product** in step 1 is worth remembering. It is the most important operation in the whole transformer. In the next chapter, attention will use dot products to decide which tokens should "look at" which other tokens.
+
+<Callout type="idea" title="The vector travels through the whole model">
+
+The embedding is only the **starting point**. The 4,096-number vector of each token then travels through all 32 layers. Each layer reads it and **adds** new information to it: about the words around it, about the meaning of the sentence, about what might come next. At the end, the vector of the last token holds what the model "thinks" the next token should be. People call this travelling vector the **residual stream**.
+
+</Callout>
+
+The hidden size grows with the model:
+
+| Model | Hidden size | Embedding table (BF16) |
+| --- | --- | --- |
+| Llama 3.1 8B | 4,096 | about 1.05 GB |
+| Llama 3.1 70B | 8,192 | about 2.1 GB |
+| Llama 3.1 405B | 16,384 | about 4.2 GB |
+
+### One table or two?
+
+The model uses the vocabulary twice: the **embedding table** at the start (ID → vector) and the **LM head** at the end (vector → a score for each token). Both have the same shape: 128,256 × hidden size. Some models **share** one table for both jobs. This is called **tied embeddings**.
+
+- **Llama 3.1 8B does not tie them.** It has two separate tables, about 1.05 GB each.
+- **Small models often tie them**, because the tables are a big part of a small model. For example, Llama 3.2 1B has a hidden size of 2,048, so one table has 128,256 × 2,048 ≈ 263 million parameters. That is about a fifth of the whole 1.2-billion-parameter model. Sharing it saves a lot.
+
+## The order problem
+
+Here is a surprising fact. The core part of a transformer, **attention**, does not know the order of the tokens. It treats its input like a bag of vectors. If you shuffle the tokens, each token sees the same set of other tokens.
+
+<Figure n="3.3" title="Without positions, word order is lost" caption="'dog bites man' and 'man bites dog' contain exactly the same three token vectors. If the model only had these vectors, it could not tell the two sentences apart. So we must add information about where each token is.">
+  <EmbOrderBlind />
+</Figure>
+
+But order is everything in language. "Dog bites man" is not news. "Man bites dog" is. So the model needs **position information**. There are two main ways to add it.
+
+### Old way: add a position vector
+
+The original transformer, and models like GPT-2, used **absolute position embeddings**. There is a second table with one learned vector for each position: position 0, position 1, position 2, and so on. The model **adds** the position vector to the token vector at the start.
+
+This works, but it has two problems:
+
+1. **A hard limit.** GPT-2 learned 1,024 position vectors. Position 1,025 simply does not exist in the table. The model cannot read longer texts.
+2. **The wrong idea of position.** Language cares more about **relative** distance ("the word just before this one") than about absolute position ("word number 517"). With absolute vectors, the model has to learn the same relation again for every position.
+
+### Modern way: RoPE, rotate the numbers
+
+Almost all modern open models, including Llama, Qwen and Mistral, use **RoPE** (Rotary Position Embedding). The idea is beautiful, and you can understand it with a clock.
+
+Take the numbers of a vector **in pairs**: numbers 1 and 2 are one pair, numbers 3 and 4 the next, and so on. Think of each pair as a little arrow on a flat surface, like a clock hand. RoPE **turns** each arrow by an angle that grows with the position of the token:
+
+- the token at position 0 is not turned,
+- the token at position 1 is turned by one step,
+- the token at position 2 is turned by two steps, and so on.
+
+<Figure n="3.4" title="How RoPE works" caption="Left: one pair of numbers drawn as an arrow, turned by 30° for every position (a toy angle). Right: the key point. Two tokens that are one position apart always have the same angle between them, whether they are at positions 2 and 3 or at positions 7 and 8. So comparing them gives the same result: only the distance matters.">
+  <EmbRopeRotation />
+</Figure>
+
+Why is this so useful? In attention, the model compares tokens with a **dot product**. The dot product of two arrows depends on their lengths and **the angle between them**. If token A is turned by angle $m\phi$ and token B by angle $n\phi$, the angle between them is $(m - n)\phi$. It depends only on the **distance** $m - n$, not on where the two tokens are in the text.
+
+<Derivation title="Checking RoPE with real numbers" result="Pairs that are one position apart give the same dot product (0.866) at positions 2–3 and at positions 7–8.">
+
+1. Take a query pair $q = (1, 0)$ and a key pair $k = (1, 0)$. Use a toy angle of $\phi = 30°$ per position.
+
+2. Turning a pair $(x, y)$ by an angle $\alpha$ gives:
+
+   $$
+   (x \cos\alpha - y \sin\alpha, \; x \sin\alpha + y \cos\alpha)
+   $$
+
+   For $(1, 0)$ this is simply $(\cos\alpha, \sin\alpha)$.
+
+3. Query at position 2 (turned 60°) and key at position 3 (turned 90°):
+
+   $$
+   q_2 = (0.5, \, 0.866), \quad k_3 = (0, \, 1)
+   $$
+
+   $$
+   q_2 \cdot k_3 = 0.5 \times 0 + 0.866 \times 1 = 0.866
+   $$
+
+4. Query at position 7 (turned 210°) and key at position 8 (turned 240°):
+
+   $$
+   q_7 = (-0.866, \, -0.5), \quad k_8 = (-0.5, \, -0.866)
+   $$
+
+   $$
+   q_7 \cdot k_8 = 0.433 + 0.433 = 0.866
+   $$
+
+5. Both equal $\cos 30° \approx 0.866$, the cosine of the angle for a distance of 1.
+
+</Derivation>
+
+Some important details:
+
+- RoPE is applied to the **queries and keys** inside **every attention layer** (you will meet queries and keys in the next chapter). It is **not** added to the embedding at the start. In Llama, the output of the embedding table has no position information at all.
+- RoPE has **no learned parameters** and costs very little math. It is just a few multiplications per number.
+- There is **no hard table limit**: any position can be turned by its angle. (But the model only works well on lengths it was trained for. See the deep dive.)
+
+### Many clock hands at different speeds
+
+One pair turning at one speed is not enough. If the hand turns 30° per position, then positions 0 and 12 look the same (a full turn of 360°). So RoPE uses **many pairs, each turning at a different speed**. Llama 3.1 8B has a head dimension of 128 numbers, so it has **64 pairs**. Pair number $i$ turns by this angle per position:
+
+$$
+\theta_i = b^{-2i/128}, \qquad i = 0, 1, \ldots, 63
+$$
+
+Here $b$ is called the **RoPE base**. For Llama 3.1 it is **500,000**.
+
+<Figure n="3.5" title="RoPE pairs turn at different speeds" caption="Each dial is one pair; the hand shows its angle at position 100. Pair 0 turns fast (a full turn every 6.3 tokens), so it is good at telling apart nearby tokens. Pair 63 turns extremely slowly (a full turn every 2.6 million tokens), so it can tell apart tokens that are very far apart.">
+  <EmbRopeFreq />
+</Figure>
+
+<Derivation title="The fastest and slowest RoPE pairs in Llama 3.1" result="The fastest pair repeats every 6.3 tokens; the slowest repeats every 2.6 million tokens.">
+
+1. Fastest pair, $i = 0$:
+
+   $$
+   \theta_0 = 500{,}000^{0} = 1 \text{ radian per position}
+   $$
+
+   One full turn is $2\pi \approx 6.28$ radians, so it repeats every **6.3 tokens**.
+
+2. Slowest pair, $i = 63$:
+
+   $$
+   \theta_{63} = 500{,}000^{-126/128} \approx 2.46 \times 10^{-6} \text{ radians per position}
+   $$
+
+3. Tokens for one full turn of the slowest pair:
+
+   $$
+   \frac{2\pi}{2.46 \times 10^{-6}} \approx 2.6 \times 10^{6} \text{ tokens}
+   $$
+
+</Derivation>
+
+So the fast pairs act like the second hand of a clock (fine detail, short distances), and the slow pairs act like the hour hand (rough position, long distances). Together they let the model know both "this word is right before me" and "that paragraph was far back".
+
+<DeepDive title="The RoPE base and long context">
+
+Llama 2 used a RoPE base of **10,000**. With that base, the slowest pair makes a full turn about every 54,000 tokens. Llama 3 raised the base to **500,000**, so the slow pairs turn much more slowly and positions stay distinct over much longer texts.
+
+But a model only works well on lengths it saw in training. If you show it positions much larger than anything it learned, the slow pairs reach angles it has never seen, and quality drops quickly. To make long-context models without training on very long texts from the start, people use **RoPE scaling** methods. They stretch the angles so that long positions look like positions the model already knows.
+
+Llama 3.1 is a real example. It was first trained with a shorter context, and then extended to **128K** tokens. Its configuration includes a RoPE scaling rule (called `llama3` scaling, with a factor of 8). The rule slows down the **low-frequency** (slow) pairs, keeps the **high-frequency** (fast) pairs as they are, and blends smoothly in between. This keeps the fine detail for nearby tokens and makes room for far positions. Other well-known methods are Position Interpolation, NTK-aware scaling and YaRN.
+
+For serving, the lesson is practical: **the context length you can serve is limited by the model's training and its RoPE settings**, not only by GPU memory. A server should not be configured with a longer maximum context than the model supports.
+
+</DeepDive>
+
+## The other end: the LM head
+
+Now let us jump to the very end of the model. After all 32 layers, each token still has a vector of 4,096 numbers. To choose the next token, we need **one score for each of the 128,256 tokens** in the vocabulary. Two steps do this:
+
+1. A final **normalisation** (RMSNorm) puts the numbers into a good range. (Chapter 2.4 explains it.)
+2. The **LM head**, a matrix of 4,096 × 128,256 numbers, multiplies the vector. The result is 128,256 raw scores, called **logits**.
+
+<Figure n="3.6" title="The LM head" caption="The final vector of the last token is normalised and multiplied by the LM head matrix. The result is one raw score (logit) for every token in the vocabulary. A higher score means a more likely next token. The next step, sampling, turns these scores into probabilities and picks one.">
+  <EmbLmHead />
+</Figure>
+
+The LM head has the same size as the embedding table, but it is used very differently. The embedding layer copies **one row** per token. The LM head multiplies by **the whole matrix** for every output token.
+
+<Derivation title="The cost of the LM head per decode step (batch 1, one H100)" result="About 1.05 GFLOPs and 1.05 GB of reading per output token: about 6.5% of every decode step.">
+
+1. Work: 2 FLOPs (one multiply, one add) for every entry of the matrix.
+
+   $$
+   2 \times 4{,}096 \times 128{,}256 \approx 1.05 \times 10^{9} \text{ FLOPs}
+   $$
+
+2. Memory: the whole matrix must be read in every decode step.
+
+   $$
+   4{,}096 \times 128{,}256 \times 2 \text{ bytes} \approx 1.05 \text{ GB}
+   $$
+
+3. Time to read it on an H100 (3.35 TB/s):
+
+   $$
+   \frac{1.05 \times 10^{9}}{3.35 \times 10^{12}} \approx 0.31 \text{ ms}
+   $$
+
+4. Share of the whole 16 GB that one decode step reads:
+
+   $$
+   \frac{1.05}{16} \approx 6.5\%
+   $$
+
+</Derivation>
+
+<Callout type="real" title="Only compute logits where you need them">
+
+During prefill of a 1,000-token prompt, the model computes vectors for all 1,000 tokens. But we only need the scores of the **last** token, because only that one predicts the next token. A naive program would run the LM head for all 1,000 tokens and create 1,000 × 128,256 logits. In 32-bit floats that is about **513 MB** of memory, for nothing. Serving engines like vLLM run the LM head only on the last token of each request. This saves both time and memory, especially with large batches.
+
+</Callout>
+
+<KeyNumbers
+  items={[
+    { value: '4,096', label: 'numbers per token vector (Llama 3.1 8B)' },
+    { value: '8 KB', label: 'read per token by the embedding lookup' },
+    { value: '64 pairs', label: 'RoPE pairs per head, base 500,000' },
+    { value: '1.05 GFLOP', label: 'LM head work for every output token' },
+  ]}
+/>
+
+## Check yourself
+
+<Quiz n={1} q="The embedding table and the LM head are both about 1.05 GB in Llama 3.1 8B. Why is one almost free and the other a real cost in every decode step?">
+
+The embedding layer only **copies one row** (8 KB) per token: no math, very little reading. The LM head **multiplies by the whole matrix** for every output token, so it reads all 1.05 GB and does about 1.05 GFLOPs per token.
+
+</Quiz>
+
+<Quiz n={2} q="Compute the cosine similarity of the toy vectors (1, 0) and (0, -1). What does the result mean?">
+
+The dot product is 1 × 0 + 0 × (−1) = 0, and both lengths are 1, so the cosine similarity is **0**. The vectors are at a right angle: in this toy picture, the two tokens are unrelated.
+
+</Quiz>
+
+<Quiz n={3} q="Why can't a model with absolute position embeddings for 1,024 positions read a text of 2,000 tokens?">
+
+Because its position table only has vectors for positions 0 to 1,023. Positions 1,024 and above have no vector at all. RoPE does not have this table limit, because it computes an angle for any position (though quality still depends on training).
+
+</Quiz>
+
+<Quiz n={4} q="With a toy RoPE angle of 30° per position, what is the angle between a query at position 10 and a key at position 4? What about positions 104 and 98?">
+
+Both pairs are **6 positions apart**, so in both cases the angle between them is 6 × 30° = **180°**. The dot product of two unit pairs is cos 180° = −1 in both cases. Only the distance matters.
+
+</Quiz>
+
+<Quiz n={5} q="Why do engines run the LM head only on the last token during prefill?">
+
+Only the last token's scores are used to choose the next token. Running the LM head on all prompt tokens would waste about 1 GFLOP per token and create a huge logits array (about 513 MB in FP32 for a 1,000-token prompt).
+
+</Quiz>
+
+<Takeaways>
+
+- The **embedding table** turns each token ID into a vector of 4,096 numbers (Llama 3.1 8B) by **copying one row**. It is big (1.05 GB) but almost free to use.
+- Vectors are **learned**: similar tokens get similar vectors, measured with the **dot product** and **cosine similarity**.
+- Attention does not know word **order** by itself. Old models added absolute position vectors; modern models use **RoPE**.
+- **RoPE** turns pairs of numbers in queries and keys by angles that grow with position, at **many speeds**. The result depends only on the **distance** between tokens.
+- The **LM head** turns the final vector into 128,256 **logits**. It reads 1.05 GB and does about 1 GFLOP **for every output token**.
+
+</Takeaways>
