@@ -1,0 +1,513 @@
+---
+title: 'Mixture of Experts'
+description: 'Models where each token uses only a few small "experts". They need the memory of a big model but the math of a small one, and this changes how we serve them.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import MoeDenseVsSparse from '../../../components/figures/inference-fundamentals/MoeDenseVsSparse.astro';
+import MoeRouterExample from '../../../components/figures/inference-fundamentals/MoeRouterExample.astro';
+import MoeExpertsTouched from '../../../components/figures/inference-fundamentals/MoeExpertsTouched.astro';
+import MoeTokensPerExpert from '../../../components/figures/inference-fundamentals/MoeTokensPerExpert.astro';
+import MoeExpertParallel from '../../../components/figures/inference-fundamentals/MoeExpertParallel.astro';
+
+So far, every model in this book has been **dense**: for every token, the model uses **all** of its weights. Llama 3.1 8B touches all 8 billion numbers for each token it writes.
+
+Many of the strongest new models work differently. They are built from many small blocks called **experts**, and each token uses only a **few** of them. This design is called **Mixture of Experts (MoE)**. It lets a model hold a lot of knowledge (many weights) while doing only a little math per token.
+
+For people who serve models, MoE is a strange mix. It needs the **memory of a big model** but the **compute of a small model**. In this chapter we will see exactly what that means, with real numbers, and why it changes batching, GPU choice and multi-GPU design.
+
+<NewWords
+  words={[
+    { word: 'Dense model', meaning: 'A model that uses all of its weights for every token. Llama 3.1 is dense.' },
+    { word: 'Expert', meaning: 'One small MLP block inside an MoE layer. A layer has many experts that all have the same shape.' },
+    { word: 'Router (gate)', meaning: 'A tiny layer that looks at a token and decides which experts it should use.' },
+    { word: 'Top-k routing', meaning: 'Each token is sent to the k experts with the highest router scores, for example k = 2.' },
+    { word: 'Total parameters', meaning: 'All the weights in the model, including every expert. This decides the memory you need.' },
+    { word: 'Active parameters', meaning: 'The weights one token really uses. This decides the math (FLOPs) per token.' },
+    { word: 'Load balancing', meaning: 'Making sure the experts get roughly the same number of tokens, so no expert becomes a bottleneck.' },
+    { word: 'Expert parallelism', meaning: 'Putting different experts on different GPUs, and sending tokens to the GPU that holds their experts.' },
+    { word: 'All-to-all', meaning: 'A communication step where every GPU sends some data to every other GPU at the same time.' },
+  ]}
+/>
+
+## The big idea: a hospital of specialists
+
+Think about a big hospital. It has 100 doctors: heart doctors, eye doctors, skin doctors, and so on. When a patient arrives, a nurse at reception looks at them and sends them to **two** doctors who fit their problem. The patient does not visit all 100 doctors.
+
+- The hospital must **pay all 100 doctors** and give each one an office. That is a fixed cost, even if a doctor sees no patients today.
+- But each patient only uses **two doctors' time**. So the hospital can treat many patients quickly.
+
+<Callout type="analogy" title="Map the hospital to an MoE model">
+
+The **doctors** are the **experts**. The **nurse at reception** is the **router**. The **offices** are **GPU memory**: every expert must be stored, even if few tokens use it. The **doctors' time** is **compute**: each token only uses the math of a few experts.
+
+</Callout>
+
+Keep this picture in mind. Almost every serving problem with MoE comes from the gap between "we must store everything" and "we only use a little of it per token".
+
+## Where the experts live
+
+Recall the shape of a transformer layer (we covered it in [Inside the Forward Pass](/inference-fundamentals/transformer-forward-pass)). Each layer has two big parts:
+
+1. **Attention**, where tokens look at each other.
+2. **The MLP** (also called the feed-forward network), where each token is processed on its own.
+
+The MLP holds most of the weights. In Llama 3.1 8B, each MLP has three matrices of size 4,096 × 14,336. That is about 176 million weights per layer, or about **5.6 billion of the 8 billion** weights in the whole model (about 70%).
+
+An MoE model keeps attention the same, but **replaces the one big MLP with many experts plus a router**:
+
+<Figure n="13.1" title="Dense layer vs MoE layer" caption="Left: in a dense model, every token goes through the same big MLP. Right: in an MoE layer, a small router picks 2 of the 8 experts for this token. Only those 2 experts run, and their outputs are added together with weights from the router. Attention (not shown) is the same in both.">
+  <MoeDenseVsSparse />
+</Figure>
+
+Each expert is a normal MLP. In **Mixtral 8x7B**, a well-known open MoE model from Mistral AI, each expert has exactly the same shape as the MLP of Llama 3.1 8B (4,096 × 14,336, three matrices). Every MoE layer has **8** of them, and each token uses **2**.
+
+Different tokens can use different experts. One token in a sentence might go to experts 1 and 6, the next token to experts 3 and 4. The choice is also made **again in every layer**, so a token takes its own path through the whole model.
+
+<Callout type="warning" title="Experts are not subject experts">
+
+The name suggests "a maths expert" and "a history expert". In practice, it is not that clean. Studies of trained MoE models find that the router often groups tokens by simple patterns (like punctuation, numbers or certain word pieces), not by human topics. Think of experts as "parts of the network that the router learned to use for certain inputs".
+
+</Callout>
+
+## The router, step by step
+
+The router is very small. It is just one matrix with one row per expert. For each token it does three things:
+
+1. **Score:** compute a dot product between the token's vector and each expert's router row. This gives one number (a **score** or **logit**) per expert.
+2. **Softmax:** turn the scores into probabilities that add up to 100%.
+3. **Top-k:** keep only the k experts with the highest probability, and rescale their probabilities so they add up to 100% again.
+
+The output of the MoE layer is the **weighted sum** of the chosen experts' outputs.
+
+Let us do a tiny example by hand. Our token vector has only 4 numbers (real models have thousands), and there are 4 experts. We use top-2.
+
+<Derivation title="Routing one token by hand" result="The token uses expert 1 with weight 0.73 and expert 3 with weight 0.27. Experts 2 and 4 do no work for this token.">
+
+1. The token vector is $x = (1,\ 0,\ 2,\ -1)$. The router has one row per expert. The dot products give these scores:
+
+   $$
+   s_1 = 2.0, \quad s_2 = 0.5, \quad s_3 = 1.0, \quad s_4 = -1.0
+   $$
+
+   (For example, if expert 1's row is $(0.5,\ 0.2,\ 0.5,\ -0.5)$, then $s_1 = 0.5 \cdot 1 + 0.2 \cdot 0 + 0.5 \cdot 2 + (-0.5)(-1) = 2.0$.)
+
+2. Softmax: raise $e$ to each score, then divide by the sum.
+
+   $$
+   e^{2.0} = 7.39, \quad e^{0.5} = 1.65, \quad e^{1.0} = 2.72, \quad e^{-1.0} = 0.37, \quad \text{sum} = 12.12
+   $$
+
+   $$
+   p = (0.61,\ 0.14,\ 0.22,\ 0.03)
+   $$
+
+3. Top-2: the two largest are expert 1 (0.61) and expert 3 (0.22). Rescale them so they add up to 1:
+
+   $$
+   w_1 = \frac{0.61}{0.61 + 0.22} \approx 0.73, \qquad w_3 = \frac{0.22}{0.61 + 0.22} \approx 0.27
+   $$
+
+4. Run only experts 1 and 3, and mix their outputs:
+
+   $$
+   \text{output} = 0.73 \cdot E_1(x) + 0.27 \cdot E_3(x)
+   $$
+
+</Derivation>
+
+<Figure n="13.2" title="The router in pictures" caption="The same example as the derivation. The router gives a score to every expert, softmax turns the scores into probabilities, and only the top 2 experts are kept. Their weights are rescaled to add up to 100%.">
+  <MoeRouterExample />
+</Figure>
+
+The router costs almost nothing. In Mixtral it is a 4,096 × 8 matrix per layer: about 33,000 weights, compared with 176 million in one expert. So the router does not change the speed of the model. **The important part is that only k experts run.**
+
+<Callout type="note">
+
+Models use small variations of this recipe. Mixtral uses softmax and top-2 as above. DeepSeek-V3 uses a sigmoid score instead of softmax, picks the top 8 of 256 experts, and also has one **shared expert** that every token always uses. The idea is the same in all of them: a cheap router picks a few experts per token.
+
+</Callout>
+
+## Total parameters vs active parameters
+
+Because each token uses only some experts, an MoE model has **two** parameter counts:
+
+- **Total parameters:** every weight in the model. This is what you must **store** in GPU memory.
+- **Active parameters:** the weights that **one token** uses. This is what decides the **math** per token.
+
+Let us calculate both for Mixtral 8x7B.
+
+<Derivation title="Total and active parameters of Mixtral 8x7B" result="About 46.7 billion total parameters, but only about 12.9 billion are active for each token.">
+
+1. One expert has three matrices of size 4,096 × 14,336:
+
+   $$
+   3 \times 4096 \times 14336 \approx 176 \text{ million weights}
+   $$
+
+2. There are 8 experts in each of the 32 layers:
+
+   $$
+   176 \text{ M} \times 8 \times 32 \approx 45.1 \text{ billion weights in experts}
+   $$
+
+3. The parts that are **not** experts: attention (about 1.34 billion across all layers) and the embedding and output tables (about 0.26 billion, because Mixtral's vocabulary has only 32,000 tokens). So:
+
+   $$
+   \text{total} \approx 45.1 + 1.34 + 0.26 \approx 46.7 \text{ billion}
+   $$
+
+4. One token uses only 2 experts per layer, plus all the shared parts:
+
+   $$
+   \text{active} \approx 176 \text{ M} \times 2 \times 32 + 1.34 + 0.26 \approx 11.3 + 1.6 = 12.9 \text{ billion}
+   $$
+
+</Derivation>
+
+Notice that the name "8x7B" does not mean 56 billion. Only the MLPs are copied 8 times. Attention and the embeddings are shared, so the total is about 46.7 billion.
+
+Here is how some well-known models compare:
+
+| Model | Type | Total parameters | Active per token | Experts per MoE layer |
+| --- | --- | --- | --- | --- |
+| Llama 3.1 8B | dense | <span class="num">8.0 B</span> | <span class="num">8.0 B</span> | — |
+| Llama 3.1 70B | dense | <span class="num">70.6 B</span> | <span class="num">70.6 B</span> | — |
+| Mixtral 8x7B | MoE | <span class="num">≈ 46.7 B</span> | <span class="num">≈ 12.9 B</span> | 8, top-2 |
+| DeepSeek-V3 | MoE | <span class="num">≈ 671 B</span> | <span class="num">≈ 37 B</span> | 256 + 1 shared, top-8 |
+
+DeepSeek-V3 is extreme: only about **5.5%** of its weights are used for each token (37 ÷ 671). Since then, many of the newest open model families (for example Qwen3, Llama 4 and gpt-oss) have also released MoE versions. MoE is no longer a rare design. As an inference engineer, you will meet it often.
+
+## Compute follows active parameters
+
+In [Why LLMs Run on GPUs](/gpu-hardware/why-gpus) we learned the rule: one token needs about **2 FLOPs per parameter it uses**. For an MoE model, "uses" means **active** parameters.
+
+<Derivation title="FLOPs per token: Mixtral vs a dense model of the same size" result="Mixtral needs about 3.6× less math per token than a dense 46.7B model would.">
+
+1. Mixtral uses about 12.9 billion active parameters per token:
+
+   $$
+   2 \times 12.9 \times 10^{9} \approx 25.8 \text{ GFLOPs per token}
+   $$
+
+2. A dense model with 46.7 billion parameters would use all of them:
+
+   $$
+   2 \times 46.7 \times 10^{9} \approx 93.4 \text{ GFLOPs per token}
+   $$
+
+3. The ratio:
+
+   $$
+   \frac{93.4}{25.8} \approx 3.6
+   $$
+
+</Derivation>
+
+This is why MoE is popular for **training** too: the model holds the knowledge of 47 billion weights, but each training token costs about as much math as a 13B model.
+
+## Memory follows total parameters
+
+Now the bad news. The router can pick **any** expert for **any** token. We cannot know in advance which experts will be needed. So **all experts must sit in GPU memory all the time.**
+
+<Derivation title="Memory for the weights of Mixtral 8x7B and DeepSeek-V3" result="Mixtral in BF16 does not fit on one 80 GB H100, but fits in FP8. DeepSeek-V3 needs a whole server of large GPUs just for its weights.">
+
+1. Mixtral in BF16 (2 bytes per weight):
+
+   $$
+   46.7 \times 10^{9} \times 2 \text{ bytes} \approx 93.4 \text{ GB} \;>\; 80 \text{ GB}
+   $$
+
+2. Mixtral in FP8 (1 byte per weight):
+
+   $$
+   46.7 \times 10^{9} \times 1 \text{ byte} \approx 46.7 \text{ GB}
+   $$
+
+   This fits on one H100. With the memory budget from [Choosing Hardware](/gpu-hardware/choosing-hardware) (use 90% of 80 GB, keep about 4 GB for overhead), about 72 − 46.7 − 4 ≈ 21 GB is left for the KV cache.
+
+3. DeepSeek-V3 is usually served with FP8 weights:
+
+   $$
+   671 \times 10^{9} \times 1 \text{ byte} \approx 671 \text{ GB}
+   $$
+
+   An 8 × H100 server has 640 GB: not enough. An 8 × H200 server has about 1,128 GB: enough, with room for KV cache.
+
+</Derivation>
+
+<KeyNumbers
+  items={[
+    { value: '46.7 B', label: 'Mixtral total parameters (memory)' },
+    { value: '12.9 B', label: 'Mixtral active parameters (math)' },
+    { value: '93 GB', label: 'Mixtral weights in BF16' },
+    { value: '≈ 5.5%', label: 'share of DeepSeek-V3 used per token' },
+  ]}
+/>
+
+So the first rule of serving MoE is: **size your GPUs for the total parameters, not the active ones.** A "13B-active" model still needs the memory of a 47B model.
+
+## Decode at batch 1: MoE feels small
+
+What about speed? In [The Roofline Model](/gpu-hardware/roofline) we saw that decode at small batch is **memory-bound**: the step time is about "bytes read ÷ bandwidth".
+
+With one user (batch 1), each layer only needs the weights of the **2 chosen experts**. The other 6 experts are not read at all. So the bytes per step follow the **active** parameters.
+
+<Derivation title="Best-case decode speed for one user: Mixtral in FP8 on one H100" result="About 260 tokens per second for one user, much faster than the ~72 tokens per second of a dense 47B model.">
+
+1. Bytes to read per token (active weights, FP8):
+
+   $$
+   12.9 \times 10^{9} \times 1 \text{ byte} = 12.9 \text{ GB}
+   $$
+
+2. Time on an H100 at 3.35 TB/s:
+
+   $$
+   \frac{12.9 \times 10^{9}}{3.35 \times 10^{12}} \approx 3.85 \text{ ms} \;\Rightarrow\; \approx 260 \text{ tokens/s}
+   $$
+
+3. For comparison, a dense 46.7B model in FP8 reads all 46.7 GB:
+
+   $$
+   \frac{46.7 \times 10^{9}}{3.35 \times 10^{12}} \approx 13.9 \text{ ms} \;\Rightarrow\; \approx 72 \text{ tokens/s}
+   $$
+
+</Derivation>
+
+For a single user, Mixtral feels like a 13B model. That is the promise of MoE.
+
+## Decode at big batch: MoE reads (almost) everything
+
+Now serve many users at once. In one decode step, the batch has B tokens (one per user), and **each token picks its own experts**. Token 1 wants experts 1 and 6, token 2 wants 3 and 4, token 3 wants 2 and 6, and so on. Very soon, **every expert is needed by someone**, and every expert's weights must be read in that step.
+
+How fast does this happen? We can calculate it. Assume each token picks its k experts at random from E experts (real routers are not random, but this is a good first guess).
+
+<Derivation title="How many experts are used in one step?" result="For Mixtral, a batch of 16 already uses about 99% of the experts. For DeepSeek-V3, a batch of 64 uses about 87%.">
+
+1. For one token, the chance that a given expert is **not** chosen is:
+
+   $$
+   1 - \frac{k}{E}
+   $$
+
+   For Mixtral, $k = 2$ and $E = 8$, so this is $1 - 0.25 = 0.75$.
+
+2. For B tokens that choose independently, the chance that **no** token chooses this expert is:
+
+   $$
+   \left(1 - \frac{k}{E}\right)^{B}
+   $$
+
+3. So the expected share of experts that **are** used in the step is:
+
+   $$
+   \text{share used} = 1 - \left(1 - \frac{k}{E}\right)^{B}
+   $$
+
+4. Mixtral at B = 16:
+
+   $$
+   1 - 0.75^{16} \approx 1 - 0.010 = 0.99
+   $$
+
+5. DeepSeek-V3 has $k = 8$, $E = 256$, so $k/E = 1/32$. At B = 64:
+
+   $$
+   1 - \left(\tfrac{31}{32}\right)^{64} \approx 1 - 0.13 = 0.87
+   $$
+
+</Derivation>
+
+<Figure n="13.3" title="Bigger batch, more experts touched" caption="The share of experts that at least one token needs, in one layer, in one decode step (assuming random routing). Mixtral reaches almost 100% at batch 16. DeepSeek-V3 has many more experts, so it takes a bigger batch, but by batch 128 it is also near 100%.">
+  <MoeExpertsTouched />
+</Figure>
+
+This changes the speed picture completely. Look at Mixtral in FP8 again, now with 32 users:
+
+- Almost every expert is used, so the step reads about **46.7 GB** of weights, not 12.9 GB.
+- Step time is about 46.7 GB ÷ 3.35 TB/s ≈ **13.9 ms**.
+- Throughput is 32 tokens ÷ 13.9 ms ≈ **2,300 tokens/s** for the GPU, about 72 tokens/s per user.
+
+A dense model with the same **active** size (12.9 GB in FP8) would take only about 3.85 ms per step at batch 32, giving about 8,300 tokens/s. So at large batch:
+
+<Callout type="idea" title="The key fact about MoE serving">
+
+At **small batch**, an MoE model reads only its active experts, so it is as fast as a small model.
+At **large batch**, it reads almost all of its experts in every step, so its **memory traffic is like a big model**, while its **math is still like a small model**.
+
+MoE saves FLOPs. It does not save memory capacity, and at large batch it does not save memory bandwidth.
+
+</Callout>
+
+## Each expert sees only part of the batch
+
+There is a second effect, and it hurts the GPU's efficiency. Remember from [The Roofline Model](/gpu-hardware/roofline) that in decode, the **arithmetic intensity** of a weight matrix is about the number of tokens that use it. In a dense model, every weight matrix is used by all B tokens, so the intensity is about B.
+
+In an MoE layer, the B tokens are **split between the experts**. Each expert only sees its share.
+
+<Derivation title="Tokens per expert and the batch needed to reach the ridge point" result="Mixtral needs about 1,180 tokens per step, and DeepSeek-V3 about 9,440, before its experts become compute-bound on an H100.">
+
+1. B tokens each choose k experts, so there are $B \times k$ "token-to-expert" jobs. Spread over E experts (if balanced), each expert gets:
+
+   $$
+   \text{tokens per expert} = \frac{B \times k}{E}
+   $$
+
+2. For an expert stored in BF16, the intensity is about the number of tokens it sees (FLOPs per byte):
+
+   $$
+   I_{\text{expert}} \approx \frac{B \times k}{E}
+   $$
+
+3. Mixtral at B = 64: $64 \times 2 \div 8 = 16$ tokens per expert, so intensity ≈ 16. A dense model at the same batch would have intensity ≈ 64. **The MoE is 4× further from the roof.**
+
+4. To reach the H100 ridge point of about 295 FLOPs per byte (BF16), we need:
+
+   $$
+   \frac{B \times k}{E} \ge 295 \;\Rightarrow\; B \ge 295 \times \frac{E}{k}
+   $$
+
+5. Mixtral: $295 \times 8 / 2 = 1{,}180$ tokens per step. DeepSeek-V3: $295 \times 256 / 8 = 9{,}440$ tokens per step.
+
+</Derivation>
+
+Very few single GPUs can hold the KV cache for thousands of active sequences. This is one big reason why large MoE models are usually served on **many GPUs at once**: the GPUs share the experts, and together they collect a very large batch, so that each expert gets enough tokens to keep its Tensor Cores busy.
+
+<Callout type="real">
+
+Serving engines run all the experts of a layer with special **grouped matrix-multiply** kernels. Instead of launching 8 (or 256) separate small multiplications, one kernel handles all experts, each with its own number of tokens. Phase 3 covers how vLLM and SGLang run MoE models, including the fused MoE kernels they use.
+
+</Callout>
+
+## Load balancing: the slowest expert sets the pace
+
+Our formula assumed the tokens are spread **evenly**. Real routers are not perfectly fair. Some experts are popular, others are rarely used.
+
+Why does this matter? All the experts of a layer work in parallel, and the next layer cannot start until **every** expert has finished. So the time of the layer is set by the **busiest** expert.
+
+<Figure n="13.4" title="Balanced vs unbalanced routing" caption="A batch of 16 tokens with top-2 routing creates 32 token-to-expert jobs. Left: each of the 8 experts gets 4 jobs. Right: the same 32 jobs, but expert 1 gets 9. If the experts are compute-bound, the whole layer now takes about 9 ÷ 4 ≈ 2.25× longer, while the other experts sit idle part of the time.">
+  <MoeTokensPerExpert />
+</Figure>
+
+Imbalance matters most when experts are spread over many GPUs (we see this next): the GPU that holds the popular expert gets more work, and every other GPU waits for it.
+
+How do people fix it?
+
+- **During training**, the router is taught to spread tokens. Older models add an extra "balance" term to the training loss. DeepSeek-V3 instead adjusts a small bias per expert during training, without an extra loss term.
+- **During inference**, we **must not** change the router's choices, because that would change the model's answers. Instead, serving systems can keep **extra copies of popular experts** on more GPUs, so their work is shared.
+
+## Spreading experts over GPUs: expert parallelism
+
+When the experts do not fit on one GPU, or when we want a very big batch, we place **different experts on different GPUs**. This is called **expert parallelism (EP)**.
+
+In each MoE layer, tokens must now travel:
+
+<Figure n="13.5" title="Expert parallelism on 4 GPUs" caption="Each GPU holds 2 of the 8 experts (for every layer). In step 1, an all-to-all sends each token's vector to the GPUs that hold its chosen experts. In step 2, each GPU runs its own experts on the tokens it received. In step 3, a second all-to-all sends the results back to each token's home GPU, where they are added together.">
+  <MoeExpertParallel />
+</Figure>
+
+So every MoE layer has **two all-to-all communication steps**. With many layers, that is a lot of communication. Let us see how much.
+
+<Derivation title="Data sent for one token in Mixtral with expert parallelism" result="About 1 MB per token per decode step, in the worst case where every expert is on another GPU.">
+
+1. The token's vector has 4,096 numbers in BF16:
+
+   $$
+   4096 \times 2 \text{ bytes} = 8 \text{ KB}
+   $$
+
+2. It is sent to 2 experts (dispatch), and 2 results come back (combine):
+
+   $$
+   2 \times 8 \text{ KB} + 2 \times 8 \text{ KB} = 32 \text{ KB per layer}
+   $$
+
+3. Mixtral has 32 MoE layers:
+
+   $$
+   32 \times 32 \text{ KB} \approx 1 \text{ MB per token}
+   $$
+
+4. With a batch of 256 tokens, shared by 8 GPUs, each GPU sends and receives about:
+
+   $$
+   \frac{256 \times 1 \text{ MB}}{8} \approx 34 \text{ MB per step}
+   $$
+
+   Over NVLink on an H100 (about 450 GB/s each way) that is about 0.07 ms. Over a 400 Gb/s network link (about 50 GB/s) it is about 0.7 ms.
+
+</Derivation>
+
+The amount of data is fine over NVLink. The bigger problem is that there are **64 all-to-all steps** per decode step (2 per layer × 32 layers), and each one has a fixed start-up delay, plus the "wait for the slowest GPU" effect from load imbalance. This is why expert parallelism is usually kept inside fast NVLink domains when possible, and why engines work hard to **overlap** communication with computation. See [Connecting GPUs](/gpu-hardware/connecting-gpus) for the link speeds, and Phase 3 for how engines combine expert, tensor and data parallelism.
+
+<DeepDive title="Capacity factor and token dropping: why training and inference differ">
+
+During **training**, MoE systems like to have fixed shapes, because fixed shapes are fast and easy to split across GPUs. So each expert gets a fixed-size **buffer** of slots for tokens. The size is set by the **capacity factor** (CF):
+
+$$
+\text{capacity per expert} = \text{CF} \times \frac{\text{tokens} \times k}{E}
+$$
+
+For example, with 1,024 tokens, top-2 and 8 experts, the average is $1024 \times 2 / 8 = 256$ tokens per expert. With CF = 1.25, each expert has $1.25 \times 256 = 320$ slots.
+
+If more than 320 tokens choose the same expert, the extra tokens are **dropped** for that expert: they skip it and only pass through the layer's residual connection. During training, this is acceptable: a few dropped tokens add a little noise, and the balance loss makes it rare.
+
+During **inference**, dropping is a bad idea, for two reasons:
+
+1. It changes the model's answer. A token that skips an expert gets a different result.
+2. Whether your token is dropped would depend on **which other users** are in the same batch. Your answer could change because someone else sent a request at the same moment. That is very hard to debug and not fair to users.
+
+So inference engines are usually **dropless**: every token always gets its experts, and the kernels handle a different number of tokens for each expert. The cost is that the busiest expert decides the speed, which is exactly the load-balancing problem from above.
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="Mixtral 8x7B has about 46.7B total and 12.9B active parameters. Which number decides how much GPU memory you need for the weights, and which decides the FLOPs per token?">
+
+**Total** parameters decide memory, because every expert must be stored (the router can pick any of them). **Active** parameters decide the FLOPs per token, because only the chosen experts do math: about 2 × 12.9B ≈ 26 GFLOPs per token.
+
+</Quiz>
+
+<Quiz n={2} q="Why is Mixtral fast for one user but not much faster than a big dense model when serving 64 users at once?">
+
+At batch 1, each layer reads only the 2 chosen experts, so the bytes per step are like a 13B model. At batch 64, the tokens choose many different experts, and almost all 8 experts are used in every layer (99%+ already at batch 16). So each step reads nearly all 46.7B weights, like a big model. Memory bandwidth, not math, limits decode, so the speed advantage mostly disappears.
+
+</Quiz>
+
+<Quiz n={3} q="A model has 64 experts and uses top-4 routing. At batch 32, how many tokens does each expert see on average? What does that mean for arithmetic intensity?">
+
+Tokens per expert = B × k ÷ E = 32 × 4 ÷ 64 = **2**. So each expert's weights are used by only about 2 tokens, giving an intensity of about 2 FLOPs per byte (BF16). That is very far below the H100 ridge point of about 295, so the experts are strongly memory-bound.
+
+</Quiz>
+
+<Quiz n={4} q="Why can't an inference engine simply send a token to a less busy expert when the router's choice is overloaded?">
+
+Because that changes the model's computation and therefore its answer. The router's choice is part of the model. Engines instead keep the choice and handle imbalance in other ways, for example with extra copies of popular experts on more GPUs, and kernels that accept different numbers of tokens per expert.
+
+</Quiz>
+
+<Quiz n={5} q="With expert parallelism, how many all-to-all steps does one decode step of a 32-layer MoE model need, and why does that matter?">
+
+Two per MoE layer (dispatch and combine), so **64** per decode step. Each all-to-all has a fixed start-up delay and must wait for the slowest GPU, so the total communication time adds up even when the amount of data is small. This is why expert parallelism prefers fast links like NVLink and why engines overlap communication with computation.
+
+</Quiz>
+
+<Takeaways>
+
+- An **MoE** layer replaces one big MLP with many **experts** and a tiny **router** that picks the top-k experts for each token.
+- **Total parameters** decide memory (all experts must be stored). **Active parameters** decide FLOPs per token.
+- Mixtral 8x7B: about **46.7B total, 12.9B active**. DeepSeek-V3: about **671B total, 37B active**.
+- At **batch 1**, MoE reads only active experts and feels like a small model. At **large batch**, almost every expert is read each step, so memory traffic is like a big model.
+- Each expert sees only **B × k ÷ E** tokens, so MoE needs much bigger batches to reach the compute roof. This is why big MoE models are served on many GPUs.
+- **Load imbalance** makes the busiest expert set the pace. **Expert parallelism** spreads experts over GPUs but adds two **all-to-all** steps per layer.
+
+</Takeaways>
