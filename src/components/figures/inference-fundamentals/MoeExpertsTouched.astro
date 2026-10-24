@@ -1,0 +1,51 @@
+---
+// Share of experts used by at least one token in a decode step, as batch size grows.
+// Assumes each token picks k different experts at random (uniform, independent).
+const W0 = 76, W1 = 690, H0 = 40, H1 = 236;
+const xOf = (b: number) => W0 + (Math.log2(b) / 8) * (W1 - W0);
+const yOf = (p: number) => H1 - p * (H1 - H0);
+const curve = (E: number, k: number) => {
+  const pts: string[] = [];
+  for (let i = 0; i <= 64; i++) {
+    const b = Math.pow(2, i / 8);
+    const p = 1 - Math.pow(1 - k / E, b);
+    pts.push(`${xOf(b).toFixed(1)},${yOf(p).toFixed(1)}`);
+  }
+  return 'M' + pts.join(' L');
+};
+const ticks = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+const mix16 = 1 - Math.pow(0.75, 16);
+const ds64 = 1 - Math.pow(31 / 32, 64);
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Chart: the share of experts used in one step grows quickly with batch size. Mixtral reaches 99 percent at batch 16. DeepSeek-V3 reaches about 87 percent at batch 64.">
+  {[0, 0.25, 0.5, 0.75, 1].map((p) => (
+    <g>
+      <line x1={W0} y1={yOf(p)} x2={W1} y2={yOf(p)} class="line" stroke-dasharray={p === 0 ? '' : '2 4'} />
+      <text x={W0 - 8} y={yOf(p) + 4} class="t3 mono" font-size="10.5" text-anchor="end">{p * 100}%</text>
+    </g>
+  ))}
+  {ticks.map((b) => (
+    <text x={xOf(b)} y={H1 + 18} class="t3 mono" font-size="10.5" text-anchor="middle">{b}</text>
+  ))}
+  <text x={(W0 + W1) / 2} y={H1 + 38} class="t2" font-size="11.5" text-anchor="middle">batch size (tokens decoded together in one step)</text>
+  <text x="16" y="28" class="t2" font-size="11.5">experts used per layer</text>
+
+  <path d={curve(8, 2)} class="line-a" stroke-width="2.4" />
+  <path d={curve(256, 8)} class="sam" stroke-width="2.4" />
+
+  <circle cx={xOf(16)} cy={yOf(mix16)} r="4.5" class="fill-a" />
+  <text x={xOf(16) + 2} y={yOf(mix16) + 20} class="ta mono" font-size="11" font-weight="600">batch 16 → {Math.round(mix16 * 100)}%</text>
+  <circle cx={xOf(64)} cy={yOf(ds64)} r="4.5" class="tam" />
+  <text x={xOf(64) + 8} y={yOf(ds64) + 18} class="tam mono" font-size="11" font-weight="600">batch 64 → {Math.round(ds64 * 100)}%</text>
+  <circle cx={xOf(1)} cy={yOf(0.25)} r="3.5" class="fill-a" />
+  <circle cx={xOf(1)} cy={yOf(8 / 256)} r="3.5" class="tam" />
+
+  <!-- legend (bottom right, where both curves are already high) -->
+  <rect x="430" y="160" width="252" height="74" rx="8" class="box" />
+  <line x1="444" y1="180" x2="468" y2="180" class="line-a" stroke-width="2.4" />
+  <text x="476" y="184" class="t" font-size="11">Mixtral 8x7B · 8 experts, top-2</text>
+  <text x="476" y="196" class="t3 mono" font-size="9.5">batch 1 uses 2 of 8 = 25%</text>
+  <line x1="444" y1="208" x2="468" y2="208" class="sam" stroke-width="2.4" />
+  <text x="476" y="212" class="t" font-size="11">DeepSeek-V3 · 256 experts, top-8</text>
+  <text x="476" y="224" class="t3 mono" font-size="9.5">batch 1 uses 8 of 256 ≈ 3%</text>
+</svg>

@@ -1,0 +1,55 @@
+---
+// Expert parallelism on 4 GPUs: dispatch (all-to-all), expert compute, combine (all-to-all).
+const gpus = [0, 1, 2, 3];
+const gx = (i: number) => 168 + i * 136;
+const W = 120;
+const arc = (a: number, b: number, top: boolean) => {
+  const x1 = gx(a) + 36 + b * 16;
+  const x2 = gx(b) + 36 + a * 16;
+  const h = 26 + Math.abs(a - b) * 16;
+  return top
+    ? `M${x1} 108 C${x1} ${108 - h}, ${x2} ${108 - h}, ${x2} 106`
+    : `M${x1} 196 C${x1} ${196 + h}, ${x2} ${196 + h}, ${x2} 198`;
+};
+---
+<svg viewBox="0 0 720 290" role="img" aria-label="Four GPUs, each holding two of the eight experts. First, an all-to-all step sends every token to the GPU that holds its experts. Then each GPU runs its experts. Then a second all-to-all sends the results back to where the tokens came from.">
+  <defs>
+    <marker id="mep-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+    <marker id="mep-v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="tv" /></marker>
+  </defs>
+
+  <!-- left labels -->
+  <text x="14" y="52" class="ta mono" font-size="11" font-weight="700">STEP 1</text>
+  <text x="14" y="68" class="t" font-size="12" font-weight="600">Dispatch</text>
+  <text x="14" y="84" class="t3" font-size="10.5">all-to-all: tokens go</text>
+  <text x="14" y="98" class="t3" font-size="10.5">to their experts</text>
+
+  <text x="14" y="146" class="t2 mono" font-size="11" font-weight="700">STEP 2</text>
+  <text x="14" y="162" class="t" font-size="12" font-weight="600">Compute</text>
+  <text x="14" y="178" class="t3" font-size="10.5">each GPU runs only</text>
+  <text x="14" y="192" class="t3" font-size="10.5">its own experts</text>
+
+  <text x="14" y="232" class="tv mono" font-size="11" font-weight="700">STEP 3</text>
+  <text x="14" y="248" class="t" font-size="12" font-weight="600">Combine</text>
+  <text x="14" y="264" class="t3" font-size="10.5">all-to-all: results</text>
+  <text x="14" y="278" class="t3" font-size="10.5">go back home</text>
+
+  {gpus.map((a) => gpus.filter((b) => b !== a).map((b) => (
+    <path d={arc(a, b, true)} class="line-a" stroke-width="1.1" opacity="0.8" marker-end="url(#mep-a)" />
+  )))}
+
+  {gpus.map((i) => (
+    <g>
+      <rect x={gx(i)} y="110" width={W} height="84" rx="12" class="box" />
+      <text x={gx(i) + W / 2} y="129" class="t" font-size="12" font-weight="700" text-anchor="middle">GPU {i}</text>
+      <rect x={gx(i) + 10} y="139" width="46" height="42" rx="7" class="box-a" />
+      <text x={gx(i) + 33} y="165" class="ta mono" font-size="12" font-weight="600" text-anchor="middle">E{i * 2 + 1}</text>
+      <rect x={gx(i) + 64} y="139" width="46" height="42" rx="7" class="box-a" />
+      <text x={gx(i) + 87} y="165" class="ta mono" font-size="12" font-weight="600" text-anchor="middle">E{i * 2 + 2}</text>
+    </g>
+  ))}
+
+  {gpus.map((a) => gpus.filter((b) => b !== a).map((b) => (
+    <path d={arc(a, b, false)} stroke-width="1.1" opacity="0.75" style="stroke: var(--violet); fill: none" marker-end="url(#mep-v)" />
+  )))}
+</svg>
