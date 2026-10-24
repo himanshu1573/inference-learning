@@ -1,0 +1,57 @@
+---
+// Where the 8.03 billion parameters of Llama 3.1 8B live.
+const layer = [
+  { n: 'Q', v: 16.78, cls: 'box-a' },
+  { n: 'K', v: 4.19, cls: 'box-a' },
+  { n: 'V', v: 4.19, cls: 'box-a' },
+  { n: 'O', v: 16.78, cls: 'box-a' },
+  { n: 'gate', v: 58.72, cls: 'violet' },
+  { n: 'up', v: 58.72, cls: 'violet' },
+  { n: 'down', v: 58.72, cls: 'violet' },
+];
+const total = layer.reduce((s, p) => s + p.v, 0);
+const W = 680;
+let acc = 20;
+const segs = layer.map((p) => {
+  const w = (p.v / total) * W;
+  const s = { ...p, x: acc, w };
+  acc += w;
+  return s;
+});
+const model = [
+  { n: '32 layers · 6.98 B', v: 6.98, cls: 'box-a' },
+  { n: 'embed 0.53 B', v: 0.525, cls: 'green' },
+  { n: 'LM head 0.53 B', v: 0.525, cls: 'amber' },
+];
+const mt = model.reduce((s, p) => s + p.v, 0);
+let macc = 20;
+const msegs = model.map((p) => {
+  const w = (p.v / mt) * W;
+  const s = { ...p, x: macc, w };
+  macc += w;
+  return s;
+});
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="Parameters in one layer: attention 41.9 million, MLP 176.2 million. Whole model: 32 layers 6.98 billion, embedding 0.53 billion, LM head 0.53 billion, total 8.03 billion">
+  <text x="20" y="24" class="t" font-size="12.5" font-weight="700">One layer: 218.1 million weights</text>
+  {segs.map((s) => (
+    <g>
+      <rect x={s.x} y="36" width={s.w - 2} height="40" rx="5" class={s.cls} />
+      <text x={s.x + s.w / 2} y="61" class="t mono" font-size="11" font-weight="600" text-anchor="middle">{s.n}</text>
+    </g>
+  ))}
+  <path d={`M20 86 V94 H${segs[3].x + segs[3].w - 2} V86`} class="line-a" />
+  <text x={(20 + segs[3].x + segs[3].w) / 2} y="110" class="ta mono" font-size="11" font-weight="600" text-anchor="middle">attention 41.9 M (19%)</text>
+  <path d={`M${segs[4].x} 86 V94 H698 V86`} class="sv" style="stroke: var(--violet); fill: none" />
+  <text x={(segs[4].x + 698) / 2} y="110" class="tv mono" font-size="11" font-weight="600" text-anchor="middle">MLP 176.2 M (81%)</text>
+
+  <text x="20" y="150" class="t" font-size="12.5" font-weight="700">The whole model: 8.03 billion weights</text>
+  {msegs.map((s, i) => (
+    <g>
+      <rect x={s.x} y="162" width={s.w - 2} height="40" rx="5" class={s.cls} />
+      <text x={i === 0 ? s.x + s.w / 2 : s.x + s.w / 2} y="187" class={i === 0 ? 'ta mono' : 't mono'} font-size={i === 0 ? '11.5' : '9.5'} font-weight="600" text-anchor="middle">{i === 0 ? s.n : i === 1 ? 'embed' : 'head'}</text>
+    </g>
+  ))}
+  <text x="20" y="226" class="t2" font-size="11.5">Embedding table and LM head: 128,256 × 4096 = 0.53 B each (not shared in the 8B model).</text>
+  <text x="20" y="243" class="t3" font-size="11">Norm scales add only 4096 numbers each, too small to see.</text>
+</svg>

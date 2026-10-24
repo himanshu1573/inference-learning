@@ -1,0 +1,103 @@
+---
+// One Llama 3.1 8B decoder layer, top to bottom, with shapes and weight sizes.
+const cx = 250;
+const bw = 230;
+const bx = cx - bw / 2;
+---
+<svg viewBox="0 0 720 690" role="img" aria-label="One decoder layer: RMSNorm, Q K V projections, RoPE, attention, output projection, add residual, RMSNorm, gate and up projections, SiLU and multiply, down projection, add residual">
+  <defs>
+    <marker id="tfplb-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+    <marker id="tfplb-arrow-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="t3" /></marker>
+  </defs>
+
+  <!-- input -->
+  <rect x={bx} y="14" width={bw} height="30" rx="15" class="box2" />
+  <text x={cx} y="34" class="t mono" font-size="12" font-weight="600" text-anchor="middle">x  [n × 4096]</text>
+
+  <!-- attention block -->
+  <path d={`M${cx} 46 V62`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="64" width={bw} height="34" rx="9" class="box" />
+  <text x={cx} y="86" class="t" font-size="12.5" font-weight="600" text-anchor="middle">RMSNorm</text>
+
+  <path d={`M${cx} 100 V114`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  {['Q', 'K', 'V'].map((n, i) => (
+    <g>
+      <rect x={bx + i * 80} y="116" width="70" height="40" rx="9" class="box-a" />
+      <text x={bx + i * 80 + 35} y="134" class="t" font-size="13" font-weight="700" text-anchor="middle">{n}</text>
+      <text x={bx + i * 80 + 35} y="149" class="t2 mono" font-size="9.5" text-anchor="middle">{i === 0 ? '× W_Q' : i === 1 ? '× W_K' : '× W_V'}</text>
+    </g>
+  ))}
+
+  <path d={`M${cx} 158 V172`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="174" width={bw} height="34" rx="9" class="box" />
+  <text x={cx} y="196" class="t" font-size="12.5" font-weight="600" text-anchor="middle">RoPE on Q and K</text>
+
+  <path d={`M${cx} 210 V224`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="226" width={bw} height="48" rx="9" class="box-a" />
+  <text x={cx} y="246" class="t" font-size="12.5" font-weight="700" text-anchor="middle">Attention, 32 heads</text>
+  <text x={cx} y="264" class="t2 mono" font-size="10.5" text-anchor="middle">softmax(QKᵀ / √128 + mask) · V</text>
+
+  <path d={`M${cx} 276 V290`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="292" width={bw} height="34" rx="9" class="box" />
+  <text x={cx} y="314" class="t" font-size="12.5" font-weight="600" text-anchor="middle">Output projection × W_O</text>
+
+  <path d={`M${cx} 328 V342`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <circle cx={cx} cy="356" r="13" class="box2" />
+  <text x={cx} y="361" class="ta" font-size="16" font-weight="700" text-anchor="middle">+</text>
+
+  <!-- residual 1 -->
+  <path d={`M${bx} 29 H95 V356 H${cx - 15}`} class="line-t" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#tfplb-arrow-g)" />
+  <text x="88" y="196" class="t3" font-size="10.5" text-anchor="middle" transform="rotate(-90 88 196)">residual: keep the input, add the change</text>
+
+  <!-- MLP block -->
+  <path d={`M${cx} 370 V384`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="386" width={bw} height="34" rx="9" class="box" />
+  <text x={cx} y="408" class="t" font-size="12.5" font-weight="600" text-anchor="middle">RMSNorm</text>
+
+  <path d={`M${cx} 422 V436`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  {['gate', 'up'].map((n, i) => (
+    <g>
+      <rect x={bx + i * 120} y="438" width="110" height="40" rx="9" class="violet" />
+      <text x={bx + i * 120 + 55} y="456" class="t" font-size="12.5" font-weight="700" text-anchor="middle">{n}</text>
+      <text x={bx + i * 120 + 55} y="471" class="t2 mono" font-size="9.5" text-anchor="middle">{i === 0 ? '× W_gate' : '× W_up'}</text>
+    </g>
+  ))}
+
+  <path d={`M${cx} 480 V494`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="496" width={bw} height="34" rx="9" class="box" />
+  <text x={cx} y="518" class="t mono" font-size="12" font-weight="600" text-anchor="middle">SiLU(gate) ⊙ up</text>
+
+  <path d={`M${cx} 532 V546`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="548" width={bw} height="34" rx="9" class="violet" />
+  <text x={cx} y="570" class="t" font-size="12.5" font-weight="600" text-anchor="middle">Down projection × W_down</text>
+
+  <path d={`M${cx} 584 V598`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <circle cx={cx} cy="612" r="13" class="box2" />
+  <text x={cx} y="617" class="ta" font-size="16" font-weight="700" text-anchor="middle">+</text>
+
+  <!-- residual 2 -->
+  <path d={`M${cx - 13} 360 H95 V612 H${cx - 15}`} class="line-t" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#tfplb-arrow-g)" />
+
+  <path d={`M${cx} 626 V640`} class="line-a" stroke-width="1.5" marker-end="url(#tfplb-arrow)" />
+  <rect x={bx} y="642" width={bw} height="30" rx="15" class="box2" />
+  <text x={cx} y="662" class="t mono" font-size="12" font-weight="600" text-anchor="middle">x  [n × 4096]  → next layer</text>
+
+  <!-- right column: shapes and sizes -->
+  <path d="M400 64 V326" class="line-a" stroke-width="2" />
+  <text x="414" y="80" class="ta mono" font-size="11" font-weight="700" letter-spacing="1">ATTENTION BLOCK · 41.9 M WEIGHTS</text>
+  <text x="414" y="104" class="t2" font-size="11.5">RMSNorm: 4096 scale numbers</text>
+  <text x="414" y="132" class="t2 mono" font-size="11">W_Q 4096 × 4096 → Q [n × 4096]</text>
+  <text x="414" y="148" class="t2 mono" font-size="11">W_K 4096 × 1024 → K [n × 1024]</text>
+  <text x="414" y="164" class="t2 mono" font-size="11">W_V 4096 × 1024 → V [n × 1024]</text>
+  <text x="414" y="196" class="t2" font-size="11.5">RoPE: rotate by position, no weights</text>
+  <text x="414" y="244" class="t2" font-size="11.5">32 query heads × 128 numbers</text>
+  <text x="414" y="260" class="t2" font-size="11.5">8 K/V heads × 128 numbers (shared)</text>
+  <text x="414" y="314" class="t2 mono" font-size="11">W_O 4096 × 4096 → [n × 4096]</text>
+
+  <path d="M400 386 V582" class="sv" stroke-width="2" style="stroke: var(--violet)" />
+  <text x="414" y="402" class="tv mono" font-size="11" font-weight="700" letter-spacing="1">MLP BLOCK · 176.2 M WEIGHTS</text>
+  <text x="414" y="452" class="t2 mono" font-size="11">W_gate 4096 × 14336 → [n × 14336]</text>
+  <text x="414" y="468" class="t2 mono" font-size="11">W_up   4096 × 14336 → [n × 14336]</text>
+  <text x="414" y="518" class="t2" font-size="11.5">multiply the two, number by number</text>
+  <text x="414" y="570" class="t2 mono" font-size="11">W_down 14336 × 4096 → [n × 4096]</text>
+</svg>

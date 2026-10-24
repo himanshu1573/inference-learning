@@ -1,0 +1,29 @@
+---
+// Grouped-query attention in Llama 3.1 8B: 32 query heads share 8 K/V heads (4 each).
+const qw = 16;
+const qgap = 3;
+const groupGap = 8;
+const x0 = 18;
+const qx = (i: number) => x0 + i * (qw + qgap) + Math.floor(i / 4) * groupGap;
+---
+<svg viewBox="0 0 720 210" role="img" aria-label="32 query heads in 8 groups of 4; each group shares one key head and one value head">
+  <text x="18" y="22" class="t" font-size="12.5" font-weight="700">32 query heads (one per small box)</text>
+  {Array.from({ length: 32 }, (_, i) => (
+    <rect x={qx(i)} y="34" width={qw} height="30" rx="4" class="box-a" />
+  ))}
+  {Array.from({ length: 8 }, (_, g) => {
+    const left = qx(g * 4);
+    const right = qx(g * 4 + 3) + qw;
+    const mid = (left + right) / 2;
+    return (
+      <g>
+        <path d={`M${left + qw / 2} 66 V82 H${right - qw / 2} V66 M${mid} 82 V112`} class="line-a" stroke-width="1.3" />
+        <rect x={mid - 32} y="114" width="64" height="40" rx="7" class="violet" />
+        <text x={mid} y="131" class="t mono" font-size="10.5" font-weight="700" text-anchor="middle">K{g + 1}</text>
+        <text x={mid} y="146" class="t mono" font-size="10.5" font-weight="700" text-anchor="middle">V{g + 1}</text>
+      </g>
+    );
+  })}
+  <text x="18" y="180" class="t2" font-size="11.5">8 key heads and 8 value heads. Each K/V pair is shared by 4 query heads.</text>
+  <text x="18" y="198" class="t3" font-size="11">Result: K and V are 1024 numbers per token (8 × 128) instead of 4096. The KV cache is 4× smaller.</text>
+</svg>

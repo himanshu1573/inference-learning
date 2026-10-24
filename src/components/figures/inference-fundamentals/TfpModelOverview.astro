@@ -1,0 +1,43 @@
+---
+// The whole Llama 3.1 8B forward pass: token IDs -> embedding -> 32 layers -> norm -> LM head -> logits.
+const boxes = [
+  { title: 'Token IDs', sub: 'from the tokenizer', shape: '[n]', cls: 'box' },
+  { title: 'Embedding', sub: 'look up one row', shape: '[n × 4096]', cls: 'box' },
+  { title: '32 layers', sub: 'attention + MLP', shape: '[n × 4096]', cls: 'box-a' },
+  { title: 'Final norm', sub: 'RMSNorm', shape: '[n × 4096]', cls: 'box' },
+  { title: 'LM head', sub: '4096 × 128,256', shape: '[n × 128,256]', cls: 'box' },
+  { title: 'Logits', sub: '128,256 scores', shape: 'use last row', cls: 'box' },
+];
+const w = 104;
+const gap = 15;
+const x0 = 12;
+---
+<svg viewBox="0 0 720 230" role="img" aria-label="The forward pass of Llama 3.1 8B: token IDs go through the embedding table, 32 decoder layers, a final normalisation and the LM head, which gives one score for each of the 128,256 tokens">
+  <defs>
+    <marker id="tfpmo-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  {boxes.map((b, i) => {
+    const x = x0 + i * (w + gap);
+    return (
+      <g>
+        {i === 2 && (
+          <g>
+            <rect x={x + 8} y="34" width={w} height="86" rx="10" class="box" />
+            <rect x={x + 4} y="39" width={w} height="86" rx="10" class="box" />
+          </g>
+        )}
+        <rect x={x} y="44" width={w} height="86" rx="10" class={b.cls} />
+        <text x={x + w / 2} y="80" class="t" font-size="12.5" font-weight="700" text-anchor="middle">{b.title}</text>
+        <text x={x + w / 2} y="100" class="t2" font-size="10.5" text-anchor="middle">{b.sub}</text>
+        <text x={x + w / 2} y="160" class="ta mono" font-size="11" font-weight="600" text-anchor="middle">{b.shape}</text>
+        {i < boxes.length - 1 && (
+          <path d={`M${x + w + 2} 87 H${x + w + gap - 2}`} class="line-a" stroke-width="1.6" marker-end="url(#tfpmo-arrow)" />
+        )}
+      </g>
+    );
+  })}
+  <text x="12" y="26" class="t3 mono" font-size="10.5" letter-spacing="1">PROMPT OF n TOKENS IN</text>
+  <text x="708" y="26" class="t3 mono" font-size="10.5" letter-spacing="1" text-anchor="end">SCORES FOR THE NEXT TOKEN OUT</text>
+  <text x="12" y="198" class="t2" font-size="11.5">Shapes in blue: every token is a row of 4096 numbers until the LM head turns it into 128,256 scores.</text>
+  <text x="12" y="216" class="t3" font-size="11">Only the last row of the logits is needed to choose the next token.</text>
+</svg>
