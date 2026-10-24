@@ -1,0 +1,42 @@
+---
+// Profiler-style timeline: eager launches leave gaps on the GPU; a CUDA Graph removes them.
+const eagerGpu = [
+  { x: 108, w: 14 }, { x: 148, w: 30 }, { x: 196, w: 10 }, { x: 236, w: 22 }, { x: 284, w: 12 },
+  { x: 322, w: 36 }, { x: 376, w: 10 }, { x: 414, w: 26 }, { x: 466, w: 12 }, { x: 504, w: 30 },
+  { x: 556, w: 10 }, { x: 594, w: 24 }, { x: 644, w: 12 },
+];
+const graphGpu = [14, 30, 10, 22, 12, 36, 10, 26, 12, 30, 10, 24, 12];
+let gx = 132;
+const graphBoxes = graphGpu.map((w) => { const b = { x: gx, w }; gx += w + 2; return b; });
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Timeline: in eager mode the CPU launches kernels one by one and the GPU waits between them; with a CUDA Graph one launch runs all kernels back to back">
+  <defs>
+    <marker id="kgt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="t3" /></marker>
+  </defs>
+  <!-- Eager -->
+  <text x="20" y="24" class="t" font-size="13" font-weight="700">Eager: one launch per kernel</text>
+  <text x="20" y="58" class="t3 mono" font-size="11">CPU</text>
+  <text x="20" y="98" class="t3 mono" font-size="11">GPU</text>
+  {eagerGpu.map((k, i) => (
+    <rect x={70 + i * 38} y="42" width="34" height="22" rx="3" class="amber" />
+  ))}
+  {eagerGpu.map((k) => (
+    <rect x={k.x} y="82" width={k.w} height="22" rx="3" class="fill-a" />
+  ))}
+  <path d="M70 114 H700" class="line" />
+  <text x="700" y="134" class="tam" font-size="11.5" font-weight="600" text-anchor="end">gaps = GPU idle, waiting for the next launch</text>
+
+  <!-- Graph -->
+  <text x="20" y="176" class="t" font-size="13" font-weight="700">CUDA Graph: one launch replays all kernels</text>
+  <text x="20" y="210" class="t3 mono" font-size="11">CPU</text>
+  <text x="20" y="250" class="t3 mono" font-size="11">GPU</text>
+  <rect x="70" y="194" width="58" height="22" rx="3" class="amber" />
+  <text x="99" y="209" class="tam mono" font-size="9.5" text-anchor="middle">replay</text>
+  {graphBoxes.map((b) => (
+    <rect x={b.x} y="234" width={b.w} height="22" rx="3" class="fill-a" />
+  ))}
+  <text x={gx + 8} y="250" class="tg" font-size="11.5" font-weight="600">done early</text>
+  <path d="M70 268 H700" class="line-t" marker-end="url(#kgt-arrow)" />
+  <text x="700" y="288" class="t3 mono" font-size="11" text-anchor="end">time →</text>
+  <text x="70" y="288" class="t3" font-size="11">Same kernels, same GPU work. Only the CPU launch cost and the gaps disappear.</text>
+</svg>

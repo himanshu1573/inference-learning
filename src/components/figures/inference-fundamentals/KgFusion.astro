@@ -1,0 +1,51 @@
+---
+// SwiGLU part of the MLP: out = SiLU(gate) × up. Unfused: 5 trips to HBM. Fused: 3 trips.
+---
+<svg viewBox="0 0 720 330" role="img" aria-label="Without fusion, SiLU and multiply are two kernels and the temporary result goes to HBM and back: five memory trips. With fusion, one kernel reads gate and up and writes the output: three trips.">
+  <defs>
+    <marker id="kgf-up" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+    <marker id="kgf-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="tr" /></marker>
+  </defs>
+
+  <!-- Unfused -->
+  <text x="20" y="24" class="t" font-size="13" font-weight="700">Without fusion: 2 kernels, 5 trips</text>
+  <rect x="40" y="44" width="120" height="44" rx="8" class="box" />
+  <text x="100" y="71" class="t mono" font-size="12" text-anchor="middle" font-weight="600">kernel 1: SiLU</text>
+  <rect x="200" y="44" width="140" height="44" rx="8" class="box" />
+  <text x="270" y="71" class="t mono" font-size="12" text-anchor="middle" font-weight="600">kernel 2: multiply</text>
+
+  <rect x="20" y="130" width="340" height="40" rx="8" class="box2" />
+  <text x="30" y="155" class="t3 mono" font-size="11">HBM</text>
+  <rect x="62" y="138" width="44" height="24" rx="4" class="box" /><text x="84" y="154" class="t2 mono" font-size="10" text-anchor="middle">gate</text>
+  <rect x="122" y="138" width="44" height="24" rx="4" class="red" /><text x="144" y="154" class="tr mono" font-size="10" text-anchor="middle">tmp</text>
+  <rect x="236" y="138" width="44" height="24" rx="4" class="box" /><text x="258" y="154" class="t2 mono" font-size="10" text-anchor="middle">up</text>
+  <rect x="296" y="138" width="50" height="24" rx="4" class="box-a" /><text x="321" y="154" class="ta mono" font-size="10" text-anchor="middle">out</text>
+
+  <path d="M84 136 V92" class="line-a" stroke-width="1.5" marker-end="url(#kgf-up)" />
+  <path d="M128 92 V134" class="sr" stroke-width="1.5" marker-end="url(#kgf-red)" />
+  <path d="M160 136 Q190 110 214 92" class="sr" stroke-width="1.5" marker-end="url(#kgf-red)" />
+  <path d="M258 136 V92" class="line-a" stroke-width="1.5" marker-end="url(#kgf-up)" />
+  <path d="M310 92 V134" class="line-a" stroke-width="1.5" marker-end="url(#kgf-up)" />
+  <text x="20" y="196" class="t2" font-size="11.5">read gate · <tspan class="tr">write tmp</tspan> · <tspan class="tr">read tmp</tspan> · read up · write out</text>
+  <text x="20" y="214" class="tr mono" font-size="11.5" font-weight="600">5 × S bytes moved</text>
+
+  <!-- Fused -->
+  <text x="400" y="24" class="t" font-size="13" font-weight="700">With fusion: 1 kernel, 3 trips</text>
+  <rect x="440" y="44" width="240" height="44" rx="8" class="box-a" />
+  <text x="560" y="71" class="ta mono" font-size="12" text-anchor="middle" font-weight="700">fused: SiLU(gate) × up</text>
+  <rect x="400" y="130" width="300" height="40" rx="8" class="box2" />
+  <text x="410" y="155" class="t3 mono" font-size="11">HBM</text>
+  <rect x="452" y="138" width="44" height="24" rx="4" class="box" /><text x="474" y="154" class="t2 mono" font-size="10" text-anchor="middle">gate</text>
+  <rect x="536" y="138" width="44" height="24" rx="4" class="box" /><text x="558" y="154" class="t2 mono" font-size="10" text-anchor="middle">up</text>
+  <rect x="620" y="138" width="50" height="24" rx="4" class="box-a" /><text x="645" y="154" class="ta mono" font-size="10" text-anchor="middle">out</text>
+  <path d="M474 136 V92" class="line-a" stroke-width="1.5" marker-end="url(#kgf-up)" />
+  <path d="M558 136 V92" class="line-a" stroke-width="1.5" marker-end="url(#kgf-up)" />
+  <path d="M645 92 V134" class="line-a" stroke-width="1.5" marker-end="url(#kgf-up)" />
+  <text x="400" y="196" class="t2" font-size="11.5">read gate · read up · write out</text>
+  <text x="400" y="214" class="tg mono" font-size="11.5" font-weight="600">3 × S bytes moved (40% less)</text>
+  <text x="400" y="232" class="t3" font-size="11">tmp lives only in registers, never in HBM</text>
+
+  <rect x="20" y="256" width="680" height="56" rx="10" class="box" />
+  <text x="36" y="280" class="t2" font-size="12"><tspan class="t mono" font-weight="700">S</tspan> = size of one of these tensors = tokens × 14,336 × 2 bytes.</text>
+  <text x="36" y="300" class="t2" font-size="12">For a prefill of 4,096 tokens: S ≈ <tspan class="ta mono" font-weight="700">117 MB</tspan>, so fusion saves about 235 MB of traffic in every layer.</text>
+</svg>
