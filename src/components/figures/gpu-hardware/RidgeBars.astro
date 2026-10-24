@@ -1,0 +1,34 @@
+---
+// Ridge point (BF16, dense) of popular data-centre GPUs.
+const gpus = [
+  { name: 'NVIDIA A100', peak: 312, bw: 2.04 },
+  { name: 'NVIDIA H100', peak: 989, bw: 3.35 },
+  { name: 'NVIDIA H200', peak: 989, bw: 4.8 },
+  { name: 'NVIDIA B200', peak: 2250, bw: 8.0 },
+  { name: 'AMD MI300X', peak: 1307, bw: 5.3 },
+];
+const x0 = 150;
+const scale = 1.3; // px per FLOP/byte
+---
+<svg viewBox="0 0 720 258" role="img" aria-label="Ridge points in BF16: A100 about 153, H100 about 295, H200 about 206, B200 about 281, MI300X about 247 FLOPs per byte">
+  {[0, 100, 200, 300, 400].map((v) => (
+    <g>
+      <line x1={x0 + v * scale} y1="18" x2={x0 + v * scale} y2="206" class="line" stroke-dasharray="2 4" />
+      <text x={x0 + v * scale} y="222" class="t3 mono" font-size="10.5" text-anchor="middle">{v}</text>
+    </g>
+  ))}
+  {gpus.map((g, i) => {
+    const r = g.peak / g.bw;
+    const y = 26 + i * 36;
+    return (
+      <g>
+        <text x={x0 - 12} y={y + 15} class="t" font-size="12" font-weight="600" text-anchor="end">{g.name}</text>
+        <rect x={x0} y={y} width={r * scale} height="22" rx="4" class={g.name.includes('H100') ? 'fill-a' : 'fill-soft'} style={g.name.includes('H100') ? '' : 'stroke: var(--accent)'} />
+        <text x={x0 + r * scale + 8} y={y + 15} class="t mono" font-size="11.5" font-weight="700">{Math.round(r)}</text>
+        <text x={x0 + r * scale + 44} y={y + 15} class="t3 mono" font-size="10.5">= {g.peak.toLocaleString('en-US')} ÷ {g.bw}</text>
+      </g>
+    );
+  })}
+  <text x={x0} y="240" class="t3" font-size="10.5">Ridge point = peak TFLOPS ÷ bandwidth in TB/s (BF16, dense).</text>
+  <text x={x0} y="254" class="t3" font-size="10.5">Higher = you need more work per byte to keep the chip busy.</text>
+</svg>
