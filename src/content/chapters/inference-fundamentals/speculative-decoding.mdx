@@ -1,0 +1,400 @@
+---
+title: 'Speculative Decoding'
+description: 'Guess several tokens cheaply, check them all in one step of the big model, and keep the correct ones. Why it works, the math of the speedup, and when it stops helping.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import SdIdea from '../../../components/figures/inference-fundamentals/SdIdea.astro';
+import SdVerify from '../../../components/figures/inference-fundamentals/SdVerify.astro';
+import SdAcceptDist from '../../../components/figures/inference-fundamentals/SdAcceptDist.astro';
+import SdMethods from '../../../components/figures/inference-fundamentals/SdMethods.astro';
+import SdBatch from '../../../components/figures/inference-fundamentals/SdBatch.astro';
+import SpeculativeCalculator from '../../../components/widgets/SpeculativeCalculator.astro';
+
+Decode writes **one token per step**, and each step must read all the weights. For Llama 3.1 8B on an H100, that is about 4.8 ms per token, at best. Quantization makes each step cheaper. But is there a way to get **more than one token from each step**?
+
+Yes. The trick is called **speculative decoding**. A small, fast helper **guesses** the next few tokens. Then the big model **checks** all the guesses in a single step. Every correct guess is a token we got almost for free. And, amazingly, the final text is **exactly the same** as if the big model had written it alone.
+
+<NewWords
+  words={[
+    { word: 'Target model', meaning: 'The big model whose answers we want. It has the final word on every token.' },
+    { word: 'Draft', meaning: 'A cheap guess of the next few tokens, made by a small model or a simple method.' },
+    { word: 'Verify', meaning: 'Run the target model once on all draft tokens to check which guesses are correct.' },
+    { word: 'Acceptance rate (α)', meaning: 'The chance that one draft token is accepted by the target. Written with the Greek letter alpha.' },
+    { word: 'Draft length (k)', meaning: 'How many tokens the draft guesses before each verify step.' },
+    { word: 'Bonus token', meaning: 'The extra token the target produces in every verify step, after the accepted guesses.' },
+    { word: 'Rejection sampling', meaning: 'A rule for accepting or rejecting random guesses so that the final result has exactly the right probabilities.' },
+    { word: 'Lossless', meaning: 'The output quality is exactly the same as without the trick. Speculative decoding is lossless.' },
+  ]}
+/>
+
+## The simple picture: a junior writer and an editor
+
+Imagine a famous writer who is very slow: each word takes one minute. Next to her sits a junior assistant who is fast but less skilled. The assistant writes the **next four words** quickly. The famous writer then reads all four words **at once**, which takes her about the same one minute as writing one word.
+
+- If she agrees with the first three words but not the fourth, she keeps three, crosses out the fourth and writes her own word instead.
+- So in one minute, she produced **four** words instead of one.
+
+<Callout type="analogy" title="Why checking is cheap">
+
+The key is that **reading four words costs the writer the same as writing one**. If checking were four times more expensive, there would be no gain. For a GPU in decode, checking several tokens really **is** about as cheap as producing one. The next section shows why.
+
+</Callout>
+
+## Why checking k tokens costs the same as one
+
+From the roofline chapter: at small batch sizes, decode is **memory-bound**. Almost all the time goes into reading the weights. The math units are mostly idle, waiting.
+
+When the target model processes **5 tokens** instead of 1, it reads the weights **once** and uses them 5 times. The bytes stay the same; only the math grows. Since the math was nearly free, the step takes almost the same time.
+
+<Derivation title="Cost of checking 5 tokens with Llama 3.1 8B on an H100" result="Verifying 5 tokens takes about 4.9 ms, almost the same as the 4.8 ms needed for 1 token.">
+
+1. Bytes to read (all weights, BF16) and time:
+
+   $$
+   \frac{16 \times 10^{9} \text{ bytes}}{3.35 \times 10^{12} \text{ bytes/s}} \approx 4.8 \text{ ms}
+   $$
+
+2. Math for 5 tokens, with about 2 FLOPs per parameter per token:
+
+   $$
+   5 \times 2 \times 8 \times 10^{9} = 80 \times 10^{9} \text{ FLOPs}
+   $$
+
+3. Time for that math at about 989 TFLOPS:
+
+   $$
+   \frac{80 \times 10^{9}}{989 \times 10^{12}} \approx 0.08 \text{ ms}
+   $$
+
+4. The memory time dominates. Even if math and memory did not overlap at all, the total would be about $4.8 + 0.08 \approx 4.9$ ms.
+
+</Derivation>
+
+This is the whole secret. Normal decode wastes most of the GPU's math power. Speculative decoding puts that idle math to work, by checking guesses.
+
+## How it works: draft, verify, accept
+
+Each round has three parts.
+
+1. **Draft.** A cheap method guesses the next $k$ tokens, one after another. (For example, $k = 4$.)
+2. **Verify.** The target model runs **once** on the current text plus all $k$ draft tokens. Like prefill, it computes its own prediction for **every position at the same time**.
+3. **Accept.** Go from left to right. Keep each draft token as long as it agrees with the target. At the **first disagreement**, throw away that guess and everything after it, and use the target's own token there instead. If all $k$ guesses are correct, the target also gives one extra token at the end, for free.
+
+<Figure n="12.1" title="One big step gives several tokens" caption="Top: normal decode makes one token per expensive step. Bottom: the draft makes 4 cheap guesses, then the target checks all of them in one step. In this example 3 guesses are correct and the target adds 1 token, so we get 4 tokens in about 6.7 ms instead of 19.2 ms.">
+  <SdIdea />
+</Figure>
+
+<Figure n="12.2" title="Inside one verify step" caption="The draft guesses ' Paris', '.', ' It', ' has'. In one pass, the target computes what it would write at each position. It agrees with the first three, but at the fourth position it would write ' is'. So we keep the three correct guesses and add ' is' from the target: 4 new tokens from one big step.">
+  <SdVerify />
+</Figure>
+
+So every verify step produces **at least 1 token** (if the very first guess is wrong, we still get the target's own token) and **at most k + 1 tokens** (all guesses correct, plus the bonus token).
+
+<Callout type="note">
+
+The rejected tokens also wrote entries into the KV cache during the verify step. The engine must **remove** them (roll back), so that the cache only holds the accepted text. Serving engines handle this inside their KV cache manager.
+
+</Callout>
+
+## The accept rule: why the output is exactly the same
+
+With **greedy** decoding (always pick the most likely token), the rule is simple: accept a draft token if it is the token the target would pick. Then the output is obviously identical to the target alone.
+
+With **sampling** (picking randomly according to probabilities, as most chatbots do), it is subtler. The draft model has its own probabilities, $q$, and the target has its probabilities, $p$. We want the final text to follow $p$ exactly. The rule is:
+
+- Accept the draft token $x$ with probability $\min\left(1, \dfrac{p(x)}{q(x)}\right)$.
+- If it is rejected, pick a new token from the "leftover" distribution: the places where the target likes a token **more** than the draft did.
+
+In words: if the target likes the guess at least as much as the draft did, **always** keep it. If the target likes it less, keep it only sometimes, in proportion. This is called **rejection sampling**, and it guarantees that every token in the output has exactly the target's probabilities. Speculative decoding is **lossless**: it changes the speed, never the quality.
+
+<DeepDive title="Proof that rejection sampling gives exactly p, with a worked example">
+
+Let the target's probabilities be $p$ and the draft's be $q$. The draft proposes a token $x$ with probability $q(x)$.
+
+**Rule.** Accept $x$ with probability $\min(1, p(x)/q(x))$. If rejected, sample from
+
+$$
+r(x) = \frac{\max(0,\ p(x) - q(x))}{\sum_y \max(0,\ p(y) - q(y))}
+$$
+
+**Probability that the output is x.** Two ways to output $x$: propose it and accept it, or reject something and then draw $x$ from $r$.
+
+$$
+P(\text{out} = x) = q(x)\min\left(1, \frac{p(x)}{q(x)}\right) + P(\text{reject})\, r(x)
+$$
+
+The first part is $\min(q(x), p(x))$. The chance of rejection is
+
+$$
+P(\text{reject}) = 1 - \sum_y \min(p(y), q(y)) = \sum_y \max(0, p(y) - q(y))
+$$
+
+(The last step is true because $p$ and $q$ both add up to 1.) So the second part is exactly $\max(0, p(x) - q(x))$. Adding them:
+
+$$
+\min(q(x), p(x)) + \max(0, p(x) - q(x)) = p(x)
+$$
+
+The output follows $p$ exactly.
+
+**Example.** The target gives Paris 0.6, Lyon 0.3, Nice 0.1. The draft gives Paris 0.5, Lyon 0.5, Nice 0.
+
+- If the draft proposes **Paris**: $p/q = 1.2$, so always accept.
+- If the draft proposes **Lyon**: accept with probability $0.3 / 0.5 = 0.6$.
+- If Lyon is rejected, the leftover is Paris $0.6 - 0.5 = 0.1$, Lyon $0$, Nice $0.1$. Normalized: Paris 0.5, Nice 0.5.
+
+Check: $P(\text{Lyon}) = 0.5 \times 0.6 = 0.3$. $P(\text{reject}) = 0.5 \times 0.4 = 0.2$. $P(\text{Paris}) = 0.5 + 0.2 \times 0.5 = 0.6$. $P(\text{Nice}) = 0.2 \times 0.5 = 0.1$. Exactly the target's probabilities.
+
+**Bonus: the acceptance rate.** The chance that a draft token is accepted is
+
+$$
+\alpha = \sum_x \min(p(x), q(x))
+$$
+
+Here: $0.5 + 0.3 + 0 = 0.8$. The more similar the draft is to the target, the closer $\alpha$ is to 1.
+
+</DeepDive>
+
+## How many tokens per step? The math
+
+Let us call $\alpha$ (alpha) the chance that one draft token is accepted. To keep the math simple, we assume every guess has the same chance, independently. With $k$ draft tokens, how many tokens do we get per verify step, on average?
+
+<Derivation title="Expected tokens per verify step" result="E = (1 − α^(k+1)) / (1 − α). For α = 0.8 and k = 4, that is 3.36 tokens per step.">
+
+1. We always get the target's own token at the end (the correction or the bonus). That is 1 token for sure.
+
+2. We get the 1st draft token if guess 1 is accepted: chance $\alpha$.
+
+3. We get the 2nd draft token only if guesses 1 **and** 2 are accepted: chance $\alpha^2$. In general, we get the $i$-th draft token with chance $\alpha^i$.
+
+4. Add up the expected count (each term is "1 × its chance"):
+
+   $$
+   E = 1 + \alpha + \alpha^{2} + \dots + \alpha^{k}
+   $$
+
+5. This is a geometric series. Its sum is:
+
+   $$
+   E = \frac{1 - \alpha^{k+1}}{1 - \alpha}
+   $$
+
+6. Example with $\alpha = 0.8$ and $k = 4$:
+
+   $$
+   E = \frac{1 - 0.8^{5}}{1 - 0.8} = \frac{1 - 0.32768}{0.2} = \frac{0.67232}{0.2} \approx 3.36
+   $$
+
+</Derivation>
+
+<Figure n="12.3" title="How many tokens one step produces" caption="With α = 0.8 and k = 4, one verify step gives 1 token with probability 0.2 (the first guess is wrong), up to 5 tokens with probability 0.41 (all 4 guesses right, plus the bonus). The average is 3.36 tokens per step.">
+  <SdAcceptDist />
+</Figure>
+
+Notice two things in the formula:
+
+- If $\alpha$ is close to 1 (the draft is almost always right), $E$ gets close to $k + 1$.
+- If $\alpha$ is small, adding more draft tokens helps less and less, because a long chain of correct guesses becomes unlikely.
+
+## The real speedup: drafting is not free
+
+The draft takes time too. Let $T$ be the time of one normal target step, and let $c$ be the cost of one draft step **as a fraction** of $T$. (A draft that is 10 times cheaper has $c = 0.1$.)
+
+One round = $k$ draft steps + 1 verify step:
+
+$$
+\text{time per round} = k \cdot c \cdot T + T = T\,(k c + 1)
+$$
+
+Normal decode makes 1 token per $T$. Speculative decoding makes $E$ tokens per round. So:
+
+$$
+\text{speedup} = \frac{E}{k c + 1} = \frac{1 - \alpha^{k+1}}{(1 - \alpha)(k c + 1)}
+$$
+
+<Derivation title="Speedup for Llama 3.1 8B with a draft 10× cheaper" result="About 2.4× faster: 500 tokens/s instead of 208.">
+
+1. Values: $\alpha = 0.8$, $k = 4$, $c = 0.1$, $T = 4.8$ ms. From before, $E = 3.36$.
+
+2. Time per round:
+
+   $$
+   4.8 \times (4 \times 0.1 + 1) = 4.8 \times 1.4 = 6.72 \text{ ms}
+   $$
+
+3. Tokens per second:
+
+   $$
+   \frac{3.36}{6.72 \text{ ms}} = 0.5 \text{ tokens per ms} = 500 \text{ tokens/s}
+   $$
+
+4. Normal decode: $1 / 4.8 \text{ ms} \approx 208$ tokens/s. Speedup:
+
+   $$
+   \frac{3.36}{1.4} = 2.40\times
+   $$
+
+</Derivation>
+
+### How long should the draft be?
+
+More draft tokens give more chances to win, but each one costs $c \cdot T$ and is less likely to be accepted. So there is a **best** $k$. With $\alpha = 0.8$ and $c = 0.1$:
+
+| k | E (tokens per round) | Round cost (× T) | Speedup |
+| --- | --- | --- | --- |
+| 1 | <span class="num">1.80</span> | 1.1 | <span class="num">1.64×</span> |
+| 2 | <span class="num">2.44</span> | 1.2 | <span class="num">2.03×</span> |
+| 3 | <span class="num">2.95</span> | 1.3 | <span class="num">2.27×</span> |
+| 4 | <span class="num">3.36</span> | 1.4 | <span class="num">2.40×</span> |
+| 5 | <span class="num">3.69</span> | 1.5 | <span class="num">2.46×</span> |
+| 6 | <span class="num">3.95</span> | 1.6 | <span class="num">2.47×</span> |
+| 7 | <span class="num">4.16</span> | 1.7 | <span class="num">2.45×</span> |
+
+The speedup peaks around $k = 6$ and then slowly falls. In practice, engines often use a small $k$ (like 3 to 5), because real acceptance rates drop for later positions and long drafts waste more work.
+
+## Try it yourself
+
+Move the sliders. Try a very good draft ($\alpha = 0.9$) that is free ($c = 0$), then make it expensive ($c = 0.4$) and watch the speedup collapse. Try a weak draft ($\alpha = 0.5$) and see how little a long draft helps.
+
+<SpeculativeCalculator />
+
+<KeyNumbers
+  items={[
+    { value: '≈ 4.9 ms', label: 'to verify 5 tokens (vs 4.8 ms for 1)' },
+    { value: '3.36', label: 'tokens per step at α = 0.8, k = 4' },
+    { value: '2.4×', label: 'speedup with a draft 10× cheaper' },
+    { value: '0', label: 'quality change: the output is identical' },
+  ]}
+/>
+
+## Where does the draft come from?
+
+Any method that can guess the next tokens can be a draft. Four families are common today.
+
+<Figure n="12.4" title="Four ways to draft" caption="A separate small model, extra prediction heads on the target (Medusa), a tiny model that reads the target's hidden features (EAGLE), or simply copying from text that already appeared (n-gram lookup). They differ in cost, in acceptance rate and in how much work they need to set up.">
+  <SdMethods />
+</Figure>
+
+### 1. A small draft model
+
+Use a smaller model from the same family, with the **same tokenizer**. For example, Llama 3.2 1B shares its tokenizer with Llama 3.1 8B and 70B, so it can draft for them. It is simple, but you must run and store a second model, with its own KV cache.
+
+### 2. Medusa heads
+
+Instead of a second model, add a few small extra **output heads** to the target model. Head 1 is the normal head that predicts the next token. Head 2 predicts the token after that, head 3 the one after that, and so on, all from the same hidden state, all in the same step. The heads need some training, but the main model stays frozen.
+
+### 3. EAGLE
+
+EAGLE uses a very small model (about one transformer layer) that drafts from the target model's **hidden features**, not just from tokens. Because it sees what the target "is thinking", it guesses much better than a separate small model of similar cost. Newer versions (EAGLE-2, EAGLE-3) draft a **tree** of possible continuations and verify many branches at once. EAGLE-style drafting is one of the most popular methods in serving engines today.
+
+### 4. N-gram lookup (prompt lookup)
+
+The cheapest draft of all: **look for the last few tokens somewhere in the prompt**, and guess that what followed them there will follow again. It costs almost nothing ($c \approx 0$) and needs no extra model. It works very well when the output **repeats** the input: summarizing a document, editing code, answering questions about a long text. It helps little for creative writing.
+
+A related idea: some models are **trained** to predict several tokens at once (multi-token prediction). DeepSeek-V3, for example, has extra prediction modules from training that can be used as a draft at inference time.
+
+```bash
+# vLLM example: n-gram (prompt lookup) speculative decoding.
+# Option names change between versions; check the vLLM docs for yours.
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --speculative-config '{"method": "ngram", "num_speculative_tokens": 4, "prompt_lookup_max": 4}'
+```
+
+## When it helps, and when it hurts
+
+Speculative decoding uses **idle math** to save **memory reads**. So it only helps when there **is** idle math: when decode is memory-bound. What happens with many users?
+
+With a batch of $B$ users and a draft of $k$ tokens, the verify step processes $B \times (k + 1)$ tokens. From the roofline chapter, the H100 becomes compute-bound at around 295 tokens per step (for BF16). So the verify step stops being "free" when $B (k + 1)$ gets close to that.
+
+<Derivation title="Speculative decoding with a large batch (8B, H100, α = 0.8, k = 4, c = 0.1)" result="At batch 256, the verify step takes about 21 ms instead of 4.8 ms, and speculative decoding becomes slower than normal decode (about 0.7×).">
+
+1. Math time for one token through the 8B model at 989 TFLOPS:
+
+   $$
+   \frac{2 \times 8 \times 10^{9}}{989 \times 10^{12}} \approx 0.0162 \text{ ms}
+   $$
+
+2. **Batch 16:** the verify step has $16 \times 5 = 80$ tokens.
+
+   $$
+   80 \times 0.0162 \approx 1.3 \text{ ms} < 4.8 \text{ ms} \Rightarrow \text{still memory-bound, verify} \approx 4.8 \text{ ms}
+   $$
+
+   The speedup stays at about 2.4×.
+
+3. **Batch 256:** the verify step has $256 \times 5 = 1{,}280$ tokens.
+
+   $$
+   1{,}280 \times 0.0162 \approx 20.7 \text{ ms} \gg 4.8 \text{ ms} \Rightarrow \text{compute-bound}
+   $$
+
+4. A normal step for 256 users is still memory-bound ($256 \times 0.0162 \approx 4.1$ ms $<$ 4.8 ms), so it takes 4.8 ms and gives 1 token per user. The speculative round takes $1.92 + 20.7 \approx 22.6$ ms and gives 3.36 tokens per user:
+
+   $$
+   \text{speedup} = \frac{3.36 / 22.6}{1 / 4.8} = \frac{3.36 \times 4.8}{22.6} \approx 0.71
+   $$
+
+</Derivation>
+
+<Figure n="12.5" title="The benefit disappears with big batches" caption="Simple model for Llama 3.1 8B on an H100 (weights only, KV cache ignored). Up to a few dozen users, verifying is almost free and the speedup is about 2.4×. Beyond about 100 users, verifying 5 tokens per user makes the step compute-bound, and the work spent on rejected guesses makes everything slower.">
+  <SdBatch />
+</Figure>
+
+<Callout type="real" title="Rules of thumb">
+
+**Helps most:** few users at once (low batch), latency-sensitive apps, predictable text (code, summaries, structured output), a draft that matches the target well. **Helps less or hurts:** many users per GPU (high throughput serving), very creative or random output (high temperature lowers $\alpha$), a draft that is expensive. For this reason, some engines shorten the draft or switch speculation off when the batch gets large.
+
+</Callout>
+
+There is also a memory cost: a separate draft model needs its own weights and its own KV cache, which take memory away from the target's KV cache. Methods like EAGLE, Medusa and n-gram lookup are popular partly because they need little or no extra memory.
+
+## Check yourself
+
+<Quiz n={1} q="Why can the target model check 4 draft tokens in about the same time as producing 1 token?">
+
+Because decode at small batch sizes is memory-bound. The step time is set by reading the weights from HBM. Checking 4 more tokens reuses the same weights, adding only math, and the math units were mostly idle anyway.
+
+</Quiz>
+
+<Quiz n={2} q="With α = 0.6 and k = 3, how many tokens does one verify step give on average?">
+
+$E = (1 - 0.6^4) / (1 - 0.6) = (1 - 0.1296) / 0.4 = 0.8704 / 0.4 \approx 2.18$ tokens per step.
+
+</Quiz>
+
+<Quiz n={3} q="Does speculative decoding change the text the model writes?">
+
+No. With greedy decoding, a token is kept only if the target would choose it. With sampling, the rejection-sampling rule (accept with probability min(1, p/q), otherwise sample from the leftover distribution) makes every token follow the target's exact probabilities. It is lossless: only the speed changes.
+
+</Quiz>
+
+<Quiz n={4} q="A free draft (c = 0) has α = 0.5. Is a draft length of 10 much better than 3?">
+
+Barely. With $k = 3$: $E = (1 - 0.5^4)/0.5 = 1.875$. With $k = 10$: $E = (1 - 0.5^{11})/0.5 \approx 2.0$. Long chains of correct guesses are very unlikely when α is low, so extra draft tokens add almost nothing (and in real systems they still cost some work).
+
+</Quiz>
+
+<Quiz n={5} q="Your service runs 300 users per GPU and is compute-bound. Should you turn on speculative decoding?">
+
+Probably not. Speculative decoding trades spare math for fewer memory reads. A compute-bound system has no spare math: verifying k + 1 tokens per user multiplies the work, and rejected guesses are wasted. It will likely reduce total throughput. It may still help if you care about the latency of a few users more than total throughput, so measure both.
+
+</Quiz>
+
+<Takeaways>
+
+- In memory-bound decode, the target can **verify k tokens for about the price of 1**. Speculative decoding uses this spare math.
+- Each round: **draft** k tokens cheaply, **verify** them in one target step, **accept** the longest correct prefix, and add 1 token from the target.
+- Expected tokens per round: $E = \dfrac{1 - \alpha^{k+1}}{1 - \alpha}$. With α = 0.8, k = 4: **3.36**. Speedup = $E / (kc + 1)$, about **2.4×** with a draft 10× cheaper.
+- With **rejection sampling**, the output is **exactly** the same as the target alone: it is lossless.
+- Drafts come from a **small model**, **Medusa heads**, **EAGLE** or **n-gram lookup**.
+- It helps most at **low batch sizes** and with **predictable text**. At large batches the step becomes compute-bound and the gain disappears.
+
+</Takeaways>
