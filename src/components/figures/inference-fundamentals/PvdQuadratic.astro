@@ -1,0 +1,34 @@
+---
+// Share of prefill FLOPs spent in attention as the prompt grows (Llama 3.1 8B, 32 layers).
+const rows = [
+  { n: '2K', lin: 28.6, att: 1.1 },
+  { n: '8K', lin: 114.4, att: 17.6 },
+  { n: '32K', lin: 457.4, att: 281.5 },
+  { n: '128K', lin: 1829.8, att: 4503.6 },
+];
+const x0 = 90, W = 440;
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="Share of prefill compute in attention: about 4 percent at 2K tokens, 13 percent at 8K, 38 percent at 32K and 71 percent at 128K">
+  <text x="20" y="22" class="t" font-size="12.5" font-weight="700">Prefill compute for one prompt: linear layers vs attention</text>
+  {rows.map((r, i) => {
+    const y = 44 + i * 46;
+    const tot = r.lin + r.att;
+    const wl = (r.lin / tot) * W;
+    const share = Math.round((r.att / tot) * 100);
+    return (
+      <g>
+        <text x={x0 - 12} y={y + 21} class="t mono" font-size="12" font-weight="600" text-anchor="end">{r.n}</text>
+        <rect x={x0} y={y} width={wl - 1} height="30" rx="4" class="box-a" />
+        <rect x={x0 + wl + 1} y={y} width={Math.max(W - wl - 1, 3)} height="30" rx="4" class="violet" />
+        {share >= 10 && <text x={x0 + wl + (W - wl) / 2} y={y + 20} class="tv mono" font-size="11" font-weight="700" text-anchor="middle">{share}%</text>}
+        {share < 10 && <text x={x0 + W + 8} y={y + 20} class="tv mono" font-size="11" font-weight="700">{share}%</text>}
+        <text x="708" y={y + 13} class="t2 mono" font-size="10.5" text-anchor="end">{Math.round(tot).toLocaleString('en-US')} TFLOP</text>
+        <text x="708" y={y + 27} class="t3 mono" font-size="10" text-anchor="end">≥ {(tot / 989 >= 1 ? (tot / 989).toFixed(1) + ' s' : Math.round((tot / 989) * 1000) + ' ms')} on H100</text>
+      </g>
+    );
+  })}
+  <rect x={x0} y="232" width="12" height="10" rx="2" class="box-a" />
+  <text x={x0 + 18} y="241" class="t2" font-size="11">linear layers (grow like n)</text>
+  <rect x={x0 + 200} y="232" width="12" height="10" rx="2" class="violet" />
+  <text x={x0 + 218} y="241" class="t2" font-size="11">attention (grows like n²)</text>
+</svg>

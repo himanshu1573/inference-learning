@@ -1,0 +1,35 @@
+---
+// Decode steps get stuck behind a big prefill; chunked prefill spreads the cost.
+const rows = [
+  { t: 'A · Decode only', s: '64 users, every step ≈ 10 ms', steps: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10] },
+  { t: 'B · A 2,000-token prompt joins', s: 'one step ≈ 75 ms: everyone waits', steps: [10, 10, 75, 10, 10, 10] },
+  { t: 'C · Chunked prefill (Phase 3)', s: '4 chunks of 500 tokens ride along', steps: [10, 10, 26, 26, 26, 26, 10] },
+];
+const scale = 4.3;
+const x0 = 20;
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Row A: decode steps of about 10 milliseconds. Row B: a long prefill of about 75 milliseconds blocks all decode users for one step. Row C: the prompt is split into 4 chunks, so steps become about 26 milliseconds instead of one 75 millisecond stall">
+  {rows.map((r, ri) => {
+    const y = 34 + ri * 86;
+    let x = x0;
+    return (
+      <g>
+        <text x={x0} y={y} class="t" font-size="12.5" font-weight="700">{r.t}</text>
+        <text x={x0 + 250} y={y} class="t3" font-size="11">{r.s}</text>
+        {r.steps.map((ms) => {
+          const w = ms * scale;
+          const cls = ms > 50 ? 'red' : ms > 15 ? 'amber' : 'box-a';
+          const node = (
+            <g>
+              <rect x={x} y={y + 12} width={w - 3} height="36" rx="5" class={cls} />
+              {ms > 15 && <text x={x + (w - 3) / 2} y={y + 35} class={ms > 50 ? 'tr mono' : 'tam mono'} font-size="10.5" font-weight="600" text-anchor="middle">{ms} ms</text>}
+            </g>
+          );
+          x += w;
+          return node;
+        })}
+      </g>
+    );
+  })}
+  <text x={x0} y="290" class="t3" font-size="11">Rough numbers for Llama 3.1 8B on one H100, assuming about half of peak speed in prefill.</text>
+</svg>
