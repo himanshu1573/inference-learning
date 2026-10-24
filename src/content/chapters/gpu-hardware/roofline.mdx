@@ -1,0 +1,490 @@
+---
+title: 'The Roofline Model'
+description: 'One simple picture that tells you if a piece of GPU work is limited by math or by memory, and why LLM decode is memory-bound while prefill is compute-bound.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import RooflineChart from '../../../components/figures/gpu-hardware/RooflineChart.astro';
+import MatmulShapes from '../../../components/figures/gpu-hardware/MatmulShapes.astro';
+import IntensityLadder from '../../../components/figures/gpu-hardware/IntensityLadder.astro';
+import RidgeBars from '../../../components/figures/gpu-hardware/RidgeBars.astro';
+import RooflineExplorer from '../../../components/widgets/RooflineExplorer.astro';
+
+A GPU has two speed limits. One is how fast it can **calculate**. The other is how fast it can **bring data** from memory. Every piece of work hits one of these limits first.
+
+The **roofline model** is a simple picture that shows both limits together. With one division, it tells you which limit you will hit, and how fast your work can possibly run. Engineers use it every day to decide what to optimise. In this chapter we build it from zero, then use it to explain the most important fact of LLM serving: **decode is memory-bound, prefill is compute-bound, and batching moves decode toward the compute limit.**
+
+<NewWords
+  words={[
+    { word: 'FLOP', meaning: 'One floating-point operation, like one multiply or one add of two decimal numbers.' },
+    { word: 'FLOPS and TFLOPS', meaning: 'FLOPs per second: how fast a chip calculates. 1 TFLOPS = one trillion (10¹²) FLOPs per second.' },
+    { word: 'Arithmetic intensity', meaning: 'How many FLOPs a piece of work does for each byte it reads or writes. Unit: FLOPs per byte.' },
+    { word: 'Memory-bound', meaning: 'Work that is slowed down by memory: the math units wait for data.' },
+    { word: 'Compute-bound', meaning: 'Work that is slowed down by math: the math units are busy all the time.' },
+    { word: 'Ridge point', meaning: 'The intensity where a GPU changes from memory-bound to compute-bound. It equals peak FLOPS divided by bandwidth.' },
+    { word: 'Roofline', meaning: 'A chart of the best possible speed for each intensity. It looks like a slope followed by a flat roof.' },
+    { word: 'Batch size', meaning: 'How many sequences (users) the GPU processes together in one step.' },
+  ]}
+/>
+
+## The simple picture: a factory and a conveyor belt
+
+Imagine a small factory. Inside, a team of workers assembles products. Boxes of parts arrive on a **conveyor belt**.
+
+- The **workers** can do at most 1,000 minutes of work per minute (there are 1,000 of them).
+- The **belt** can bring at most 10 boxes per minute.
+
+Now, how many products come out per minute? **It depends on how much work is inside each box.**
+
+- If each box needs only **1 minute** of work, the belt brings 10 boxes per minute, so the workers do only 10 minutes of work per minute. The other 990 workers stand around waiting. The **belt** is the limit.
+- If each box needs **500 minutes** of work, 2 boxes per minute are enough to keep all 1,000 workers busy. The belt can bring more, but the workers cannot keep up. The **workers** are the limit.
+- The change happens at **100 minutes of work per box**: the belt brings 10 boxes per minute, and 10 × 100 = 1,000 minutes of work, exactly what the workers can do.
+
+<Callout type="analogy" title="Map the factory to a GPU">
+
+The **workers** are the GPU's math units (Tensor Cores). The **belt** is the memory bandwidth (HBM). The **work per box** is the **arithmetic intensity**: how much math we do with each byte we bring in. And the change point (100 minutes per box) is called the **ridge point**.
+
+</Callout>
+
+That is the whole roofline idea. The rest of this chapter just puts real GPU numbers into it.
+
+## The two speed limits of a GPU
+
+Every GPU spec sheet gives two numbers that matter here. For an **NVIDIA H100 SXM** with BF16 numbers:
+
+- **Peak compute**, written $\pi$ (the Greek letter "pi"): about **989 TFLOPS**. That is $989 \times 10^{12}$ FLOPs per second, for dense matrix math on Tensor Cores.
+- **Memory bandwidth**, written $\beta$ (the Greek letter "beta"): about **3.35 TB/s**. That is $3.35 \times 10^{12}$ bytes per second from HBM.
+
+<Callout type="note">
+
+GPU makers often print a second, bigger number "with sparsity" (for the H100: 1,979 TFLOPS in BF16). That number only applies to a special pattern of zeros in the weights, which normal LLMs do not use. In this book we always use the **dense** number.
+
+</Callout>
+
+A piece of GPU work (people call it a **kernel**) needs to do some number of FLOPs, and it needs to move some number of bytes between HBM and the chip. Both take time.
+
+## Arithmetic intensity: work per byte
+
+Here is the key definition:
+
+$$
+I = \frac{\text{FLOPs done}}{\text{bytes moved to or from HBM}}
+$$
+
+$I$ is the **arithmetic intensity**. Its unit is **FLOPs per byte**. A high intensity means we do a lot of math with each byte. A low intensity means we move a lot of data and do little with it.
+
+Let us compute it for a very simple job.
+
+<Derivation title="Intensity of adding two vectors" result="About 0.17 FLOPs per byte: very low. Adding vectors is always memory-bound.">
+
+1. The job: $c = a + b$, where $a$, $b$ and $c$ are lists of $n$ numbers in BF16 (2 bytes each).
+
+2. FLOPs: one add for each position.
+
+   $$
+   \text{FLOPs} = n
+   $$
+
+3. Bytes: read $a$ ($2n$ bytes), read $b$ ($2n$ bytes), write $c$ ($2n$ bytes).
+
+   $$
+   \text{bytes} = 2n + 2n + 2n = 6n
+   $$
+
+4. Divide. The $n$ cancels out.
+
+   $$
+   I = \frac{n}{6n} = \frac{1}{6} \approx 0.17 \text{ FLOPs per byte}
+   $$
+
+</Derivation>
+
+Notice that the size $n$ does not matter. A long vector and a short vector have the same intensity. What matters is the **shape** of the work: how many times each byte is used.
+
+## The roofline formula
+
+Now we put the two limits together. A kernel needs time for its math and time for its memory traffic:
+
+$$
+t_{\text{math}} = \frac{\text{FLOPs}}{\pi} \qquad t_{\text{memory}} = \frac{\text{bytes}}{\beta}
+$$
+
+A good GPU program does both **at the same time**: while the Tensor Cores work on some data, the next data is already on its way. So the total time is set by the **slower** of the two:
+
+$$
+t \approx \max\left(t_{\text{math}},\; t_{\text{memory}}\right)
+$$
+
+<Derivation title="From the time formula to the roofline" result="Best possible speed = min(π, β × I). This one line is the roofline model.">
+
+1. The speed we get is the FLOPs divided by the time.
+
+   $$
+   \text{speed} = \frac{\text{FLOPs}}{t} = \frac{\text{FLOPs}}{\max\left(\frac{\text{FLOPs}}{\pi},\ \frac{\text{bytes}}{\beta}\right)}
+   $$
+
+2. Dividing by the larger time gives the smaller speed. So we can split the max into a min of two speeds.
+
+   $$
+   \text{speed} = \min\left(\pi,\ \frac{\text{FLOPs}}{\text{bytes}} \times \beta\right)
+   $$
+
+3. The fraction FLOPs ÷ bytes is exactly the intensity $I$.
+
+   $$
+   \boxed{\ \text{speed} = \min(\pi,\ \beta \times I)\ }
+   $$
+
+</Derivation>
+
+Read the formula in words:
+
+- If the intensity is **low**, the speed is $\beta \times I$. It grows when the intensity grows. We are **memory-bound**.
+- If the intensity is **high**, the speed is $\pi$, the peak. More intensity does not help any more. We are **compute-bound**.
+
+If you draw this formula on a chart with logarithmic axes, you get a slope that rises, then a flat line. It looks like the **roof of a house**, which is where the name comes from.
+
+<Figure n="5.1" title="The roofline of an NVIDIA H100 (BF16)" caption="The blue line is the best possible speed for each intensity. Left of the ridge point, speed is limited by memory bandwidth (the slope). Right of it, speed is limited by peak compute (the flat roof). The dots are LLM operations that we compute later in this chapter.">
+  <RooflineChart />
+</Figure>
+
+## The ridge point
+
+The slope and the flat roof meet at one point. There, both limits are equal:
+
+$$
+\beta \times I^{*} = \pi \quad\Longrightarrow\quad I^{*} = \frac{\pi}{\beta}
+$$
+
+$I^{*}$ is the **ridge point**. It is the most useful single number about a GPU for inference work.
+
+<Derivation title="The ridge point of an H100" result="About 295 FLOPs per byte. Work with less intensity than this is memory-bound on an H100.">
+
+1. Peak compute (BF16, dense):
+
+   $$
+   \pi = 989 \times 10^{12} \text{ FLOPs/s}
+   $$
+
+2. Memory bandwidth:
+
+   $$
+   \beta = 3.35 \times 10^{12} \text{ bytes/s}
+   $$
+
+3. Divide. The $10^{12}$ cancels out.
+
+   $$
+   I^{*} = \frac{989}{3.35} \approx 295 \text{ FLOPs per byte}
+   $$
+
+</Derivation>
+
+Think about what this means. To keep an H100 fully busy, a kernel must do **about 295 math operations for every single byte** it reads from HBM. That is a lot. Most simple operations are far below it. Only big matrix multiplications with a lot of reuse get there.
+
+## The intensity of a matrix multiplication
+
+Almost all the work in an LLM is **matrix multiplication**. So let us find its intensity. This derivation is the heart of the chapter, so we go slowly.
+
+<Derivation title="Intensity of C = A × B" result="I = MKN ÷ (MK + KN + MN). It depends only on the three sizes.">
+
+1. Shapes: $A$ has $M$ rows and $K$ columns. $B$ has $K$ rows and $N$ columns. The result $C$ has $M$ rows and $N$ columns. All numbers are BF16 (2 bytes).
+
+2. FLOPs: each of the $M \times N$ results is a sum of $K$ products. That is $K$ multiplies and $K$ adds, so $2K$ FLOPs per result.
+
+   $$
+   \text{FLOPs} = 2 \times M \times N \times K = 2MNK
+   $$
+
+3. Bytes: read $A$, read $B$, write $C$, each number once, 2 bytes each.
+
+   $$
+   \text{bytes} = 2\,(MK + KN + MN)
+   $$
+
+4. Divide. The 2s cancel out.
+
+   $$
+   I = \frac{2MNK}{2\,(MK + KN + MN)} = \frac{MNK}{MK + KN + MN}
+   $$
+
+</Derivation>
+
+Now we use it for the two phases of inference. In an LLM layer, $B$ is a **weight matrix**. For Llama 3.1 8B, many weight matrices are about $4096 \times 4096$, so $K = N = 4096$. $A$ holds the tokens we are processing: $M$ is the **number of tokens** in this step.
+
+<Figure n="5.2" title="Same weights, different amounts of work" caption="In decode, one token's row meets the whole weight matrix, so each weight is used once. In prefill, 1,000 rows meet the same weight matrix, so each weight is used 1,000 times. The bytes read are almost the same, but the work is 1,000 times bigger.">
+  <MatmulShapes />
+</Figure>
+
+<Derivation title="Decode: one token (M = 1)" result="I ≈ 1 FLOP per byte. Far below the ridge point of 295.">
+
+1. Put $M = 1$ and $K = N = 4096$ into the formula.
+
+   $$
+   I = \frac{1 \times 4096 \times 4096}{1 \times 4096 + 4096 \times 4096 + 1 \times 4096}
+   $$
+
+2. The weight matrix term ($4096 \times 4096 \approx 16.8$ million) is much bigger than the others (4096 each).
+
+   $$
+   I \approx \frac{4096 \times 4096}{4096 \times 4096} = 1
+   $$
+
+3. In words: we read each 2-byte weight once and do 2 FLOPs with it (one multiply, one add). That is 2 FLOPs per 2 bytes, so 1 FLOP per byte.
+
+</Derivation>
+
+<Derivation title="Prefill: a 1,000-token prompt (M = 1000)" result="I ≈ 670 FLOPs per byte. Above the ridge point of 295, so prefill is compute-bound.">
+
+1. Put $M = 1000$ and $K = N = 4096$ into the formula.
+
+   $$
+   I = \frac{1000 \times 4096 \times 4096}{1000 \times 4096 + 4096 \times 4096 + 1000 \times 4096}
+   $$
+
+2. Compute the top: $1000 \times 16{,}777{,}216 \approx 16.8 \times 10^{9}$.
+
+3. Compute the bottom: $4.10 \times 10^{6} + 16.78 \times 10^{6} + 4.10 \times 10^{6} \approx 24.97 \times 10^{6}$.
+
+4. Divide.
+
+   $$
+   I \approx \frac{16.8 \times 10^{9}}{24.97 \times 10^{6}} \approx 672 \text{ FLOPs per byte}
+   $$
+
+</Derivation>
+
+This is why the two phases of inference feel so different on the GPU:
+
+<KeyNumbers
+  items={[
+    { value: '~1', label: 'FLOP/byte for decode at batch 1' },
+    { value: '~295', label: 'FLOP/byte ridge point of an H100' },
+    { value: '~670', label: 'FLOP/byte for a 1,000-token prefill' },
+  ]}
+/>
+
+<Figure n="5.3" title="Where common operations sit" caption="Operations left of the ridge point are memory-bound on an H100; operations right of it are compute-bound. Decode with a small batch is deep in the memory-bound zone. A long prefill and big matrix multiplications are compute-bound.">
+  <IntensityLadder />
+</Figure>
+
+## Decode at batch 1: using 0.3% of the GPU
+
+Let us read the roofline for one user doing decode.
+
+<Derivation title="How much of the H100 does one decode stream use?" result="About 3.35 TFLOPS out of 989, roughly 0.34%. The rest of the chip waits for memory.">
+
+1. Decode intensity at batch 1 (from above):
+
+   $$
+   I \approx 1 \text{ FLOP per byte}
+   $$
+
+2. Roofline speed:
+
+   $$
+   \min(\pi,\ \beta \times I) = \min(989,\ 3.35 \times 1) = 3.35 \text{ TFLOPS}
+   $$
+
+3. As a share of peak:
+
+   $$
+   \frac{3.35}{989} \approx 0.0034 = 0.34\%
+   $$
+
+</Derivation>
+
+This matches what we found in chapter 1, from a different direction: reading 16 GB takes 4.8 ms, doing 16 GFLOPs takes only 0.016 ms. The GPU is like a factory with 1,000 workers where 997 of them have nothing to do.
+
+## Batching moves the dot to the right
+
+So how do we give the workers more to do? We cannot make one user's decode do more math per byte. But we can serve **many users at the same time**.
+
+If $B$ users are in decode together, their $B$ token rows form one matrix with $M = B$. The weights are read **once** from HBM, and used for **all B tokens**. Using our formula with $B$ much smaller than 4096:
+
+$$
+I \approx \frac{B \times 4096 \times 4096}{4096 \times 4096} = B
+$$
+
+**For decode, the intensity is roughly equal to the batch size.** Batch 64 gives about 64 FLOPs per byte. Batch 295 reaches the ridge point.
+
+<Derivation title="Decode speed for different batch sizes (Llama 3.1 8B, H100, BF16)" result="Going from batch 1 to batch 64 gives about 64× more total tokens per second, and each user is almost as fast as before.">
+
+1. The weights must be read once per step, whatever the batch size:
+
+   $$
+   t_{\text{memory}} = \frac{16 \times 10^{9}}{3.35 \times 10^{12}} \approx 4.78 \text{ ms}
+   $$
+
+2. The math grows with the batch: $2 \times P \times B$ FLOPs per step.
+
+   $$
+   t_{\text{math}} = \frac{2 \times 8 \times 10^{9} \times B}{989 \times 10^{12}} \approx 0.0162 \times B \text{ ms}
+   $$
+
+3. **Batch 1:** $t_{\text{math}} = 0.016$ ms. The step takes $\max(4.78, 0.016) = 4.78$ ms. Total speed: 1 ÷ 4.78 ms ≈ **209 tokens/s**.
+
+4. **Batch 64:** $t_{\text{math}} = 1.04$ ms. The step still takes $\max(4.78, 1.04) = 4.78$ ms. Total speed: 64 ÷ 4.78 ms ≈ **13,400 tokens/s**. Each user still gets about 209 tokens/s.
+
+5. **Batch 512:** $t_{\text{math}} = 8.29$ ms. Now math is the slower part, so the step takes 8.29 ms. Total: 512 ÷ 8.29 ms ≈ **61,800 tokens/s**, but each user gets only about 121 tokens/s.
+
+</Derivation>
+
+This is one of the most important results in the book. **Below the ridge point, adding users to a batch is almost free.** The GPU has to read the weights anyway, so extra users ride along at nearly no cost. Above the ridge point, each extra user slows everyone down a little. This is why serving engines work so hard to build big batches (Phase 3).
+
+<Callout type="warning" title="The roofline is a ceiling, not a promise">
+
+Real kernels never quite reach the roof. A good memory-bound kernel might reach 70–90% of the bandwidth. A good compute-bound kernel might reach 50–80% of peak FLOPS. People call these **MBU** (model bandwidth utilisation) and **MFU** (model FLOPs utilisation). Also, the numbers above ignore the **KV cache**, which adds extra memory reads (see the deep dive below). Use the roofline to find the limit and the direction, not the exact speed.
+
+</Callout>
+
+## Prefill is compute-bound
+
+Prefill processes all the prompt tokens in one go. For a 1,000-token prompt, $M = 1000$ and the intensity is about 670, well above the ridge point. So prefill runs at the **compute roof**.
+
+<Derivation title="Best-case prefill time for a 1,000-token prompt (Llama 3.1 8B, H100)" result="About 16 ms at peak compute. In practice maybe 25–35 ms, because real kernels do not reach 100% of peak.">
+
+1. FLOPs for prefill: about $2P$ for each prompt token.
+
+   $$
+   2 \times 8 \times 10^{9} \times 1000 = 16 \times 10^{12} \text{ FLOPs}
+   $$
+
+2. Time at peak compute:
+
+   $$
+   \frac{16 \times 10^{12}}{989 \times 10^{12}} \approx 0.016 \text{ s} = 16 \text{ ms}
+   $$
+
+3. Compare with the memory time: the weights are read only once for all 1,000 tokens, which takes 4.8 ms. Math (16 ms) is the bigger number, so prefill is compute-bound.
+
+</Derivation>
+
+So the two phases need different things from the hardware. **Prefill wants more FLOPS. Decode wants more bandwidth** (or bigger batches). Some advanced systems even run the two phases on different GPUs. This is called **disaggregated serving**, and we study it in Phase 3.
+
+## Different GPUs, different ridge points
+
+Every GPU has its own roofline. Here are the ridge points of popular data-centre GPUs:
+
+<Figure n="5.4" title="Ridge points of popular GPUs (BF16)" caption="The ridge point is peak compute divided by bandwidth. A higher ridge point means you need more work per byte (for decode: a bigger batch) to keep the chip busy.">
+  <RidgeBars />
+</Figure>
+
+| GPU | BF16 peak | FP8 peak | Bandwidth | Ridge BF16 | Ridge FP8 |
+| --- | --- | --- | --- | --- | --- |
+| A100 80GB | <span class="num">312</span> | no FP8 | <span class="num">~2.0 TB/s</span> | <span class="num">~153</span> | — |
+| H100 SXM | <span class="num">989</span> | <span class="num">1,979</span> | <span class="num">3.35 TB/s</span> | <span class="num">~295</span> | <span class="num">~591</span> |
+| H200 | <span class="num">989</span> | <span class="num">1,979</span> | <span class="num">4.8 TB/s</span> | <span class="num">~206</span> | <span class="num">~412</span> |
+| B200 | <span class="num">~2,250</span> | <span class="num">~4,500</span> | <span class="num">~8 TB/s</span> | <span class="num">~281</span> | <span class="num">~562</span> |
+| MI300X | <span class="num">~1,307</span> | <span class="num">~2,615</span> | <span class="num">5.3 TB/s</span> | <span class="num">~247</span> | <span class="num">~493</span> |
+
+(Peak numbers are in TFLOPS and are approximate datasheet values for dense math. A100, H100, H200 and B200 are from NVIDIA; MI300X is from AMD. Exact numbers depend on the product version, clock speed and power limit.)
+
+Two lessons from this table:
+
+1. **Compute grows faster than bandwidth.** From A100 to H100, peak BF16 grew about 3.2×, but bandwidth grew only about 1.6×. So the ridge point almost doubled. Each new generation needs even bigger batches to stay busy.
+2. **The H200 is the H100 with better memory.** Same compute, but 4.8 TB/s instead of 3.35 TB/s. For memory-bound decode, that is directly faster: reading 16 GB takes 16 ÷ 4,800 s ≈ 3.3 ms instead of 4.8 ms, about **1.4× more tokens per second**, with the same chip.
+
+## Smaller numbers move the dot too
+
+There is a second way to raise the intensity: make each weight **smaller**. If we store weights in **FP8** (1 byte) instead of BF16 (2 bytes), we still do 2 FLOPs per weight, but we read only 1 byte:
+
+$$
+I \approx \frac{2B \text{ FLOPs}}{1 \text{ byte per weight}} = 2B
+$$
+
+At batch 1, decode reads 8 GB instead of 16 GB, so the step takes about 2.4 ms instead of 4.8 ms. That is about **2× faster decode**, just from using half as many bytes. With 4-bit weights, the gain is even bigger. This is the main reason **quantization** is so popular for inference. We study number formats in the next chapter and quantization methods in Phase 2.
+
+## Try it yourself
+
+Use the explorer below. Pick a GPU, a model size, a weight precision and a batch size. Watch where the dot lands and how the speeds change. Things to try:
+
+- Start with **H100, 8B, BF16, batch 1**. You should see about 209 tokens/s, memory-bound.
+- Increase the batch size step by step. Watch the total tokens/s grow while the per-user speed stays almost the same, until the dot hits the roof.
+- Switch to **H200**. The roof moves up on the slope, so decode at small batch gets faster.
+- Switch the precision to **FP8** or **INT4**. The dot jumps to the right.
+
+<RooflineExplorer gpu="H100" model={8} batch={1} />
+
+<DeepDive title="The KV cache does not get the batching bonus">
+
+So far we counted only the **weights**. But decode must also read the **KV cache**: saved data for every earlier token of each sequence (Phase 2 explains it fully). And there is an important difference.
+
+The weights are **shared** by all users in the batch: read once, used B times. The KV cache is **private**: each sequence has its own, and it is used only for that sequence. So the attention part of decode has an intensity of about **1 FLOP per byte, whatever the batch size.** It stays deep in the memory-bound zone.
+
+Let us measure how much it costs. For Llama 3.1 8B, one token of KV cache takes:
+
+$$
+2 \times 32 \text{ layers} \times 8 \text{ KV heads} \times 128 \times 2 \text{ bytes} = 131{,}072 \text{ bytes} = 128 \text{ KiB}
+$$
+
+(The first 2 is for K and V. 8 KV heads × 128 numbers per head, 2 bytes per number.) For a conversation that is 1,000 tokens long:
+
+$$
+1000 \times 131{,}072 \text{ bytes} \approx 131 \text{ MB per sequence}
+$$
+
+With a batch of 64 such sequences, each decode step must read:
+
+$$
+64 \times 131 \text{ MB} \approx 8.4 \text{ GB of KV cache}
+$$
+
+That is more than half the size of the weights! The memory time per step becomes:
+
+$$
+\frac{16 \text{ GB} + 8.4 \text{ GB}}{3.35 \text{ TB/s}} \approx 7.3 \text{ ms}
+$$
+
+instead of 4.8 ms. With longer texts or bigger batches, the KV cache can become the **main** memory cost, bigger than the weights. This is why so much research goes into making the KV cache smaller: grouped-query attention, latent attention, KV cache quantization (Phase 2), and why serving engines manage KV memory so carefully (Phase 3).
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="What does arithmetic intensity measure, and what is its unit?">
+
+It measures how much math a piece of work does for each byte it moves to or from memory. The unit is FLOPs per byte.
+
+</Quiz>
+
+<Quiz n={2} q="Write the roofline formula and explain the two parts.">
+
+Best speed = min(π, β × I). π is the peak compute of the chip (the flat roof). β × I is the speed allowed by memory bandwidth at intensity I (the slope). You get whichever is smaller.
+
+</Quiz>
+
+<Quiz n={3} q="An A100 has 312 TFLOPS (BF16) and about 2.0 TB/s. What is its ridge point? Is decode at batch 64 memory-bound on it?">
+
+Ridge = 312 ÷ 2.04 ≈ 153 FLOPs per byte. Decode at batch 64 has an intensity of about 64, which is below 153, so it is still memory-bound on the A100.
+
+</Quiz>
+
+<Quiz n={4} q="Why does a bigger batch make decode more efficient, but not make one user's tokens come faster?">
+
+The weights are read once per step and shared by all sequences in the batch, so more sequences means more useful math for the same memory traffic. But each user still gets one token per step, and the step time cannot go below the time to read the weights. So total throughput grows, while per-user speed stays the same (or gets a bit slower once you pass the ridge point).
+
+</Quiz>
+
+<Quiz n={5} q="You switch from an H100 to an H200 for a chatbot with small batches. Which phase gets faster, and by about how much?">
+
+Decode, because it is memory-bound and the H200 has 4.8 TB/s instead of 3.35 TB/s. It gets about 4.8 ÷ 3.35 ≈ 1.4× faster. Prefill is compute-bound, and both GPUs have the same peak compute, so prefill barely changes.
+
+</Quiz>
+
+<Takeaways>
+
+- **Arithmetic intensity** = FLOPs ÷ bytes moved. It tells you how much math you do with each byte.
+- **Roofline:** best speed = **min(π, β × I)**. Below the **ridge point** (π ÷ β, about **295** on an H100) you are memory-bound; above it, compute-bound.
+- For a matrix multiplication, I = MKN ÷ (MK + KN + MN). **Decode at batch B has I ≈ B**, so at batch 1 it uses only about **0.3%** of an H100.
+- **Prefill** of a long prompt has high intensity and is **compute-bound**.
+- **Batching** and **smaller number formats** both move decode to the right on the roofline. The **KV cache** does not get the batching bonus, so it becomes the next bottleneck.
+
+</Takeaways>
