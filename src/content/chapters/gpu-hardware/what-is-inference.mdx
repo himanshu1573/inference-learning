@@ -1,0 +1,309 @@
+---
+title: 'Start Here: What Is LLM Inference?'
+description: 'Training vs inference, what a model really is, and how it writes an answer one token at a time. No experience needed.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import ModelAsNumbers from '../../../components/figures/gpu-hardware/ModelAsNumbers.astro';
+import TokenLoop from '../../../components/figures/gpu-hardware/TokenLoop.astro';
+import NextTokenProbs from '../../../components/figures/gpu-hardware/NextTokenProbs.astro';
+import PrefillDecode from '../../../components/figures/gpu-hardware/PrefillDecode.astro';
+import InferenceStack from '../../../components/figures/gpu-hardware/InferenceStack.astro';
+
+You type a question into a chat app. A second later, words start to appear, one after another. This chapter explains what happens in that second. You do not need any experience. If you can multiply two numbers, you can follow everything here.
+
+<NewWords
+  words={[
+    { word: 'LLM', meaning: 'Large Language Model. A program that has learned to continue text, like ChatGPT, Llama or Claude.' },
+    { word: 'Parameter (weight)', meaning: 'One number inside the model. A model has billions of them.' },
+    { word: 'Training', meaning: 'The long process where the model learns, by changing its weights again and again.' },
+    { word: 'Inference', meaning: 'Using a model that has already learned, to produce an answer. The weights do not change.' },
+    { word: 'Token', meaning: 'A small piece of text, often part of a word. The model reads and writes tokens, not letters.' },
+    { word: 'Prompt', meaning: 'The text you give to the model: your question plus any instructions.' },
+    { word: 'GPU', meaning: 'Graphics Processing Unit. A chip that can do a huge number of simple calculations at the same time.' },
+    { word: 'Serving', meaning: 'Running a model as a service so that many people can send requests to it at once.' },
+  ]}
+/>
+
+## The big idea in one minute
+
+An LLM does only one thing: **it looks at some text and guesses the next small piece of text.** That is all. To write a long answer, it guesses one piece, adds it to the text, and guesses again. It repeats this hundreds of times.
+
+**Inference** is the name for this work: using a model that has already learned, to produce output. Every time you send a message to a chatbot, a computer somewhere does inference for you.
+
+This book is about doing inference **fast**, for **many people**, at a **low cost**. That is harder than it sounds, and the rest of the book explains why, layer by layer.
+
+## Training vs inference
+
+There are two big moments in the life of a model.
+
+1. **Training.** The model reads a huge amount of text (trillions of words). After each small piece, it checks its guess and changes its numbers a little to be better next time. This takes weeks or months on thousands of GPUs. It happens **once** (or a few times) for each model.
+2. **Inference.** The finished model answers questions. The numbers are now **frozen**: they do not change. This happens **every time** someone uses the model, millions of times per day.
+
+<Callout type="analogy" title="A student and an exam">
+
+Think of a student. **Training** is the years of study: reading books, making mistakes, learning. **Inference** is the exam: the student uses what they already know to answer questions. During the exam, the student does not learn anything new. They only use their knowledge, and they must answer quickly.
+
+</Callout>
+
+| | Training | Inference |
+| --- | --- | --- |
+| Goal | Make the model learn | Use the model to answer |
+| Do the weights change? | Yes, all the time | No, they are frozen |
+| How often? | Once per model | Every request, all day |
+| Who waits? | The research team, for weeks | A user, for seconds |
+| What matters most? | Total compute | Speed per user and cost per answer |
+
+Training gets a lot of attention in the news. But a model is trained once and then used millions of times, so for a company that runs a popular model, **inference is a cost that never stops.** Making it 2× cheaper saves money every single day.
+
+## What is a model, really?
+
+When people say "a model", it sounds like something magic. It is not. **A model is a very large list of numbers**, plus a fixed recipe that says how to use them.
+
+The numbers are called **parameters** or **weights**. They are grouped into big tables called **matrices** (one table is a *matrix*). The recipe, called the **architecture**, says: "multiply the input by this table, then by that table, then add these, and so on."
+
+<Figure n="1.1" title="A model is a file of numbers" caption="Each weight matrix is a big table of numbers. A layer is made of several matrices. Llama 3.1 8B stacks 32 layers. When you save all the numbers, you get one file of about 16 GB.">
+  <ModelAsNumbers />
+</Figure>
+
+Let us use a real model as our example in this book: **Llama 3.1 8B** from Meta. The "8B" means it has about **8 billion** parameters.
+
+How big is that file? Each number is usually stored in a format called **FP16** or **BF16**, which uses **2 bytes** per number. (We explain these formats in the chapter on number formats.)
+
+<Derivation title="How big is Llama 3.1 8B in memory?" result="About 16 GB just to hold the weights.">
+
+1. Count the numbers. The model has about 8 billion parameters (8.03 billion, to be exact).
+
+   $$
+   P \approx 8 \times 10^{9}
+   $$
+
+2. Each number takes 2 bytes in BF16.
+
+   $$
+   \text{bytes per parameter} = 2
+   $$
+
+3. Multiply to get the total size.
+
+   $$
+   8 \times 10^{9} \times 2 \text{ bytes} = 16 \times 10^{9} \text{ bytes} = 16 \text{ GB}
+   $$
+
+</Derivation>
+
+So before the model can answer even one question, **16 GB of numbers must be loaded into the memory of the GPU.** Keep this number in mind. It will come back again and again.
+
+<Callout type="note">
+
+We use **GB = 10⁹ bytes** (one billion bytes) in this book, because GPU makers use it too. Some tools show **GiB = 2³⁰ bytes**, which is about 7% bigger. So 16 GB is about 14.9 GiB. Do not be surprised if your tools show slightly different numbers.
+
+</Callout>
+
+## Text becomes tokens
+
+A computer cannot do math with letters. So the first step is to cut the text into small pieces called **tokens**, and give each token a number (its **ID**).
+
+A token is often a whole short word, or a part of a longer word. A space is usually attached to the start of the next word. For example, a tokenizer might cut a sentence like this:
+
+| Position | Token text | Token ID |
+| --- | --- | --- |
+| 1 | `The` | <span class="num">791</span> |
+| 2 | `␣capital` | <span class="num">6864</span> |
+| 3 | `␣of` | <span class="num">315</span> |
+| 4 | `␣France` | <span class="num">9822</span> |
+| 5 | `␣is` | <span class="num">374</span> |
+
+The `␣` sign shows a space. (The IDs are an example. Every model family has its own tokenizer, so the exact cuts and IDs change.)
+
+Llama 3.1 knows **128,256** different tokens. This list is called the **vocabulary**. In English text, one token is about **¾ of a word** on average, so 100 words are roughly 130 tokens.
+
+<Callout type="idea">
+
+The model never sees letters. It reads a list of token IDs, and it writes a list of token IDs. A separate program, the **tokenizer**, converts text to IDs at the start and IDs back to text at the end.
+
+</Callout>
+
+## The token-by-token loop
+
+Now the main idea of this chapter. The model does not write the whole answer at once. It writes **one token at a time**, in a loop:
+
+<Figure n="1.2" title="How an LLM writes an answer" caption="The model runs all of its layers to produce one score for every token in its vocabulary. One token is picked and added to the text. Then the whole loop runs again with the longer text. It stops at a special 'end' token or when it reaches a length limit.">
+  <TokenLoop />
+</Figure>
+
+Let us follow the loop with a real example. The prompt is: **"The capital of France is"**.
+
+1. The 5 prompt tokens go into the model.
+2. The model runs through all 32 layers. At the end it produces **one score for each of the 128,256 tokens** in the vocabulary. The scores are turned into probabilities that add up to 100%.
+3. One token is picked. Here, " Paris" has by far the highest probability.
+4. " Paris" is added to the text. The text is now "The capital of France is Paris".
+5. The loop runs again with 6 tokens, and maybe picks ".". Then again, and again, until the model picks a special **end** token.
+
+<Figure n="1.3" title="Scores for the next token" caption="After the prompt, the model gives a probability to every possible next token. Most of the probability goes to ' Paris'. The way we choose from this list is called sampling; we cover it in Phase 2.">
+  <NextTokenProbs />
+</Figure>
+
+<Callout type="example" title="How many loops for one answer?">
+
+Suppose the answer is 300 words. At about 1.3 tokens per word, that is around **400 tokens**. So the model must run the full loop **400 times**, one after another. Each loop uses **all 8 billion weights**. You cannot do loop number 10 before loop number 9 is finished, because loop 10 needs the token from loop 9.
+
+</Callout>
+
+This last point is very important. **Writing an answer is a sequence of steps that cannot run in parallel.** This one fact shapes almost everything in LLM serving.
+
+## Two phases: prefill and decode
+
+If you look closely at the loop, the first step is different from the others.
+
+- In the **first step**, the model must read the whole prompt. All prompt tokens are already known, so the model can process them **all together, in parallel**. This phase is called **prefill**.
+- In **every step after that**, there is only **one new token** to process. This phase is called **decode**.
+
+<Figure n="1.4" title="Prefill, then decode" caption="Prefill processes all prompt tokens together and produces the first output token. Decode then produces one token per step. The time until the first token appears is called TTFT (time to first token). The time between tokens is called TPOT (time per output token).">
+  <PrefillDecode />
+</Figure>
+
+As a user, you feel these two phases as two different kinds of waiting:
+
+- **TTFT (time to first token):** how long until the first word appears. This mostly depends on prefill. A long prompt means a longer wait.
+- **TPOT (time per output token):** how fast the words come after that. This depends on decode.
+
+We will come back to prefill and decode many times. They behave very differently on a GPU, and good serving systems treat them differently. For now, just remember the two names.
+
+## Why is inference a hard engineering problem?
+
+At first, inference sounds easy: load the file, run the loop. So why do people build whole companies and open-source projects (like vLLM, SGLang and llm-d) around it? Here are the main reasons, with numbers.
+
+### Reason 1: every token reads the whole model
+
+For each new token in decode, the GPU must read **all 16 GB** of weights from its memory. Even a very fast GPU memory has a speed limit. Let us estimate the best possible speed on a popular data-centre GPU, the **NVIDIA H100**, whose memory can move about **3.35 TB per second** (3.35 trillion bytes per second).
+
+<Derivation title="Best-case decode speed for one user on one H100" result="At most about 200 tokens per second for a single user, even with a perfect program.">
+
+1. Bytes to read for one token: all the weights.
+
+   $$
+   16 \text{ GB} = 16 \times 10^{9} \text{ bytes}
+   $$
+
+2. Memory speed of the H100 (this is called **memory bandwidth**).
+
+   $$
+   3.35 \text{ TB/s} = 3.35 \times 10^{12} \text{ bytes per second}
+   $$
+
+3. Time to read all weights once = bytes ÷ speed.
+
+   $$
+   \frac{16 \times 10^{9}}{3.35 \times 10^{12}} \approx 0.0048 \text{ s} = 4.8 \text{ ms}
+   $$
+
+4. One token per read, so tokens per second = 1 ÷ time.
+
+   $$
+   \frac{1}{0.0048 \text{ s}} \approx 209 \text{ tokens per second}
+   $$
+
+</Derivation>
+
+Real systems are a bit slower than this, because there are other costs. But the lesson is clear: **for one user, the speed limit is set by how fast memory can be read**, not by how fast the GPU can calculate. You will learn why in the chapters on the memory hierarchy and the roofline model.
+
+### Reason 2: many users at the same time
+
+A popular service gets thousands of requests at once. One H100 costs a few dollars per hour to rent. If each GPU serves only one user, the cost per answer is very high. So we want **one GPU to serve many users together**. This is called **batching**, and it creates new problems: memory gets full, some users wait for others, and the system must decide who goes next. Phase 3 is all about this.
+
+### Reason 3: memory keeps growing during an answer
+
+To avoid repeating work, the model saves some data for every token it has seen. This saved data is called the **KV cache**. It grows with every token, for every user. For long conversations, it can become bigger than the model itself. Phase 2 explains it in detail.
+
+### Reason 4: some models do not fit on one GPU
+
+Bigger models, like Llama 3.1 70B (about 140 GB in BF16) or 405B (about 810 GB), do not fit in the 80 GB memory of one H100. They must be split across several GPUs that talk to each other very fast. Then we need many such servers, managed by a system like Kubernetes. Phases 3 and 4 cover this.
+
+<KeyNumbers
+  items={[
+    { value: '16 GB', label: 'weights of Llama 3.1 8B in BF16' },
+    { value: '128,256', label: 'tokens in its vocabulary' },
+    { value: '4.8 ms', label: 'to read all weights once on an H100' },
+    { value: '~200 tok/s', label: 'best-case speed for one user' },
+  ]}
+/>
+
+<DeepDive title="How many calculations does one token need?">
+
+There is a famous and very useful rule: **one token needs about 2 calculations for every parameter.**
+
+Why 2? Almost all the work in an LLM is multiplying numbers by weights and adding up the results. For each weight, the GPU does one **multiply** (input × weight) and one **add** (add the result to a running total). That is 2 operations per weight. People call each of these operations a **FLOP** (floating-point operation).
+
+$$
+\text{FLOPs per token} \approx 2 \times P
+$$
+
+For Llama 3.1 8B:
+
+$$
+2 \times 8 \times 10^{9} = 16 \times 10^{9} \text{ FLOPs} = 16 \text{ GFLOPs per token}
+$$
+
+An H100 can do roughly $989 \times 10^{12}$ of these operations per second (with BF16). So the math for one token takes about:
+
+$$
+\frac{16 \times 10^{9}}{989 \times 10^{12}} \approx 0.016 \text{ ms}
+$$
+
+Compare this with the **4.8 ms** needed to read the weights. The math is about **300 times faster** than the memory reading! The GPU spends most of its time waiting for data. This simple comparison is the seed of the whole roofline chapter. (The rule ignores the attention part of the model, which grows with the length of the text. We add it back later.)
+
+</DeepDive>
+
+## The map of this book
+
+Inference touches every layer of the computer, from the chip to the cloud. This book climbs those layers one at a time. Each layer answers one big question:
+
+<Figure n="1.5" title="The five layers of the inference stack" caption="We start at the bottom, with the GPU, because every trick in the layers above exists to work around a limit of the hardware.">
+  <InferenceStack />
+</Figure>
+
+You are now at the bottom layer. In the next chapter, we look at why a GPU, and not a normal CPU, is the machine that runs LLMs.
+
+## Check yourself
+
+<Quiz n={1} q="What is the difference between training and inference?">
+
+Training changes the model's weights so that it learns. Inference uses the finished model to produce answers, and the weights do not change. Training happens once per model; inference happens for every request.
+
+</Quiz>
+
+<Quiz n={2} q="A model has 70 billion parameters stored in BF16. How much memory do the weights need?">
+
+70 × 10⁹ parameters × 2 bytes = **140 GB**. This does not fit in one 80 GB GPU, so the model must be split across at least two GPUs (in practice, more, to leave room for the KV cache).
+
+</Quiz>
+
+<Quiz n={3} q="Why can't the model write all the tokens of an answer at the same time?">
+
+Because each new token depends on all the tokens before it. To compute token 10, the model needs token 9 to be finished first. So decode is a chain of steps, one after another.
+
+</Quiz>
+
+<Quiz n={4} q="Your prompt becomes much longer, but the answer length stays the same. Which gets worse: TTFT or TPOT?">
+
+Mainly **TTFT**. A longer prompt means more work in prefill, so the first token takes longer. TPOT also gets a little worse, because each decode step must look back at more tokens, but the bigger change is in TTFT.
+
+</Quiz>
+
+<Takeaways>
+
+- An LLM only guesses the **next token**. It writes an answer by repeating this in a loop.
+- **Inference** means using a trained model. The weights are frozen. It happens for every request, so its cost never stops.
+- A model is a **big file of numbers**: Llama 3.1 8B is about **16 GB** in BF16 (8 billion × 2 bytes).
+- **Prefill** reads the whole prompt in parallel. **Decode** writes one token per step. Users feel them as **TTFT** and **TPOT**.
+- For one user, decode speed is limited by **how fast the GPU can read memory**, not by how fast it can calculate.
+
+</Takeaways>
