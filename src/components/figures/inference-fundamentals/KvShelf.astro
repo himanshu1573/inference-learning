@@ -1,0 +1,44 @@
+---
+// The KV cache of one sequence: for every layer a K strip and a V strip, one cell per token.
+const layers = ['Layer 1', 'Layer 2', 'Layer 3', '…', 'Layer 32'];
+const tokens = 6;
+const cw = 34, ch = 18;
+---
+<svg viewBox="0 0 720 330" role="img" aria-label="The KV cache of one sequence: each layer stores a row of keys and a row of values, with one cell per token. A new token adds one cell to every row.">
+  <text x="20" y="24" class="t" font-size="14" font-weight="700">One sequence, after 6 tokens (and the 7th arriving)</text>
+  {Array.from({ length: tokens + 1 }, (_, i) => (
+    <text x={150 + i * (cw + 4) + cw / 2} y="50" class={i === tokens ? 'ta mono' : 't3 mono'} font-size="10" text-anchor="middle" font-weight={i === tokens ? '700' : '400'}>t{i + 1}</text>
+  ))}
+  {layers.map((name, li) => {
+    const y = 60 + li * 50;
+    if (name === '…') {
+      return <text x="150" y={y + 22} class="t3" font-size="16">⋮ same for layers 4 … 31</text>;
+    }
+    return (
+      <g>
+        <text x="20" y={y + 22} class="t" font-size="12" font-weight="600">{name}</text>
+        <text x="132" y={y + 13} class="t3 mono" font-size="10" text-anchor="end">K</text>
+        <text x="132" y={y + 35} class="t3 mono" font-size="10" text-anchor="end">V</text>
+        {Array.from({ length: tokens + 1 }, (_, i) => (
+          <g>
+            <rect x={150 + i * (cw + 4)} y={y} width={cw} height={ch} rx="3" class={i === tokens ? 'box-a' : 'green'} style={i === tokens ? 'stroke-dasharray:3 2' : ''} />
+            <rect x={150 + i * (cw + 4)} y={y + 22} width={cw} height={ch} rx="3" class={i === tokens ? 'box-a' : 'amber'} style={i === tokens ? 'stroke-dasharray:3 2' : ''} />
+          </g>
+        ))}
+      </g>
+    );
+  })}
+  <!-- explanation box -->
+  <rect x="440" y="62" width="262" height="196" rx="10" class="box" />
+  <text x="456" y="86" class="ta mono" font-size="10.5" font-weight="600">ONE CELL (one token, one layer)</text>
+  <text x="456" y="110" class="t" font-size="12">8 KV heads × 128 numbers</text>
+  <text x="456" y="128" class="t" font-size="12">= 1,024 numbers</text>
+  <text x="456" y="146" class="t" font-size="12">× 2 bytes (BF16) = <tspan class="ta mono" font-weight="700">2 KiB</tspan></text>
+  <line x1="456" y1="160" x2="686" y2="160" class="line" stroke-dasharray="3 3" />
+  <text x="456" y="182" class="t2" font-size="11.5">K + V = 4 KiB per layer</text>
+  <text x="456" y="200" class="t2" font-size="11.5">× 32 layers</text>
+  <text x="456" y="222" class="t" font-size="12.5" font-weight="700">= 128 KiB per token</text>
+  <text x="456" y="242" class="t3" font-size="10.5">Llama 3.1 8B, BF16</text>
+  <text x="440" y="290" class="t2" font-size="11.5">A new token adds one K cell and one V cell</text>
+  <text x="440" y="307" class="t2" font-size="11.5">to <tspan class="t" font-weight="700">every</tspan> layer. Old cells never change.</text>
+</svg>

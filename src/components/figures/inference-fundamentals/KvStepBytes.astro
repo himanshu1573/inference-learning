@@ -1,0 +1,31 @@
+---
+// Bytes read in one decode step: shared weights + each sequence's own KV cache (8K context).
+const rows = [
+  { b: 1, kv: 1.07, total: 17.1, ms: '5.1 ms', tps: '196 tok/s' },
+  { b: 8, kv: 8.59, total: 24.7, ms: '7.4 ms', tps: '1,087 tok/s' },
+  { b: 32, kv: 34.4, total: 50.4, ms: '15.0 ms', tps: '2,126 tok/s' },
+];
+const W = 16.06;
+const scale = 9.6; // px per GB
+const x0 = 110;
+const labelInside = (kv: number) => kv * scale > 90;
+---
+<svg viewBox="0 0 720 290" role="img" aria-label="Bytes read in one decode step for batch 1, 8 and 32 at 8K context. The weights stay 16 GB; the KV cache part grows from 1 GB to 34 GB.">
+  <text x="20" y="24" class="t" font-size="13" font-weight="700">Bytes read by the GPU in one decode step</text>
+  <text x="20" y="42" class="t3" font-size="11">Llama 3.1 8B on one H100 (3.35 TB/s), every sequence at 8,192 tokens</text>
+  {rows.map((r, i) => {
+    const y = 70 + i * 62;
+    return (
+      <g>
+        <text x={x0 - 12} y={y + 18} class="t mono" font-size="12" font-weight="600" text-anchor="end">batch {r.b}</text>
+        <rect x={x0} y={y} width={W * scale} height="28" rx="4" class="box-a" />
+        <text x={x0 + 8} y={y + 18} class="ta" font-size="11" font-weight="600">weights 16.1 GB</text>
+        <rect x={x0 + W * scale} y={y} width={Math.max(4, r.kv * scale)} height="28" rx="4" class="amber" />
+        {labelInside(r.kv) && <text x={x0 + W * scale + 8} y={y + 18} class="tam" font-size="11" font-weight="600">KV {r.kv} GB</text>}
+        {!labelInside(r.kv) && <text x={x0 + W * scale + Math.max(4, r.kv * scale) + 6} y={y + 18} class="tam" font-size="11" font-weight="600">KV {r.kv} GB</text>}
+        <text x={x0} y={y + 46} class="t2 mono" font-size="10.5">total {r.total} GB → {r.ms} per step → {r.tps} for the batch</text>
+      </g>
+    );
+  })}
+  <text x="20" y="270" class="t3" font-size="11">The weights are read once and shared by all users. Each user’s KV cache is read separately, so this part grows with the batch.</text>
+</svg>

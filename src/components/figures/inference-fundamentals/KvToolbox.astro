@@ -1,0 +1,33 @@
+---
+// Map of the tools that make the KV cache smaller or cheaper, with where the book covers them.
+const tools = [
+  { t: 'Store fewer heads', d: 'GQA, MQA, MLA', w: 'chapter 2.8' },
+  { t: 'Keep only recent tokens', d: 'sliding window', w: 'chapter 2.8' },
+  { t: 'Use smaller numbers', d: 'FP8 KV cache', w: 'this chapter' },
+  { t: 'Read it faster', d: 'FlashAttention kernels', w: 'chapter 2.9' },
+  { t: 'Waste no space', d: 'PagedAttention (blocks)', w: 'chapter 3.3' },
+  { t: 'Share common prefixes', d: 'prefix caching', w: 'chapter 3.7' },
+  { t: 'Move it to cheaper memory', d: 'offload, LMCache', w: 'chapter 3.13' },
+];
+---
+<svg viewBox="0 0 720 340" role="img" aria-label="Seven ways to deal with a large KV cache and the chapters that explain them">
+  <defs>
+    <marker id="kvt-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <rect x="20" y="130" width="170" height="80" rx="12" class="amber" />
+  <text x="105" y="160" class="t" font-size="14" font-weight="700" text-anchor="middle">The KV cache is</text>
+  <text x="105" y="180" class="t" font-size="14" font-weight="700" text-anchor="middle">big and slow to read</text>
+  <text x="105" y="198" class="tam" font-size="11" text-anchor="middle">grows with users × context</text>
+  {tools.map((tool, i) => {
+    const y = 16 + i * 46;
+    return (
+      <g>
+        <path d={`M190 170 C 225 170, 225 ${y + 18}, 260 ${y + 18}`} class="line-a" stroke-width="1.2" marker-end="url(#kvt-arrow)" />
+        <rect x="264" y={y} width="436" height="36" rx="8" class="box" />
+        <text x="278" y={y + 23} class="t" font-size="12.5" font-weight="700">{tool.t}</text>
+        <text x="462" y={y + 23} class="t2" font-size="11.5">{tool.d}</text>
+        <text x="690" y={y + 23} class="ta mono" font-size="10" text-anchor="end">{tool.w}</text>
+      </g>
+    );
+  })}
+</svg>
