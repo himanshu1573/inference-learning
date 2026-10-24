@@ -1,0 +1,57 @@
+---
+// Decorative circuit traces with glowing nodes, like the iotamine hero.
+// Hidden in reading mode.
+interface Props { variant?: 'hero' | 'cta' }
+const { variant = 'hero' } = Astro.props;
+---
+<svg class={`circuit ${variant}`} viewBox="0 0 1200 420" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+  <g class="traces" fill="none" stroke-width="1">
+    <path d="M60 40 V100 H140" />
+    <path d="M0 210 H120 V250 H250" />
+    <path d="M90 260 V300 H170 V290" />
+    <path d="M200 120 H300 V180" />
+    <path d="M300 180 H340 V260 H420 V250" />
+    <path d="M330 40 H460 V90" />
+    <path d="M360 70 H420" />
+    <path d="M500 0 V60 H560" />
+    <path d="M640 0 V40 H720 V80" />
+    <path d="M760 160 H860 V120" />
+    <path d="M840 140 H900 V200 H880" />
+    <path d="M820 230 H940" />
+    <path d="M960 30 V130 H1040" />
+    <path d="M1000 80 H1080 V40" />
+    <path d="M1060 260 V200 H1180" />
+    <path d="M1100 300 H1200" />
+    <path d="M1120 180 V330" />
+    <path d="M1150 120 H1200" />
+    <path d="M30 360 H90 V400" />
+    <path d="M980 360 H1060 V410" />
+    <path d="M240 390 H330" />
+  </g>
+  <g class="nodes">
+    <circle cx="80" cy="60" r="3" /><circle cx="250" cy="250" r="3" /><circle cx="340" cy="100" r="3" />
+    <circle cx="420" cy="250" r="3" /><circle cx="560" cy="60" r="3" /><circle cx="720" cy="80" r="3" />
+    <circle cx="860" cy="120" r="3" /><circle cx="940" cy="230" r="3" /><circle cx="1040" cy="130" r="3" />
+    <circle cx="1180" cy="200" r="3" /><circle cx="160" cy="300" r="3" /><circle cx="1120" cy="330" r="3" />
+  </g>
+  <g class="glow">
+    <circle cx="80" cy="60" r="9" /><circle cx="420" cy="250" r="9" /><circle cx="720" cy="80" r="9" />
+    <circle cx="1040" cy="130" r="9" /><circle cx="250" cy="250" r="9" /><circle cx="940" cy="230" r="9" />
+  </g>
+</svg>
+<style>
+  .circuit {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .traces { stroke: var(--trace); }
+  .nodes circle { fill: var(--node); opacity: 0.7; }
+  .glow circle { fill: var(--node); opacity: 0.12; animation: glow 3.2s ease-in-out infinite; }
+  .glow circle:nth-child(2n) { animation-delay: 1.4s; }
+  @keyframes glow { 50% { opacity: 0.28; } }
+  @media (max-width: 720px) { .circuit { opacity: 0.6; } }
+</style>

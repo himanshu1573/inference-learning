@@ -1,0 +1,72 @@
+---
+import Logo from './Logo.astro';
+import { phases } from '../data/curriculum';
+const year = new Date().getFullYear();
+---
+<footer class="site-footer">
+  <div class="container cols">
+    <div class="about">
+      <Logo />
+      <p>A free book that explains how large language models are served, from the GPU chip up to a production platform. Written in simple English.</p>
+    </div>
+    <div>
+      <h4>Phases</h4>
+      <ul>
+        {phases.map((p) => <li><a href={`/${p.slug}`}>{p.num}. {p.title}</a></li>)}
+      </ul>
+    </div>
+    <div>
+      <h4>Book</h4>
+      <ul>
+        <li><a href="/#roadmap">Roadmap</a></li>
+        <li><a href="/#how">How chapters work</a></li>
+        <li><a href="/#faq">FAQ</a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="container base">
+    <span>© {year} The LLM Inference Book</span>
+    <span>Numbers come from public vendor datasheets and may change with new hardware.</span>
+  </div>
+</footer>
+<style>
+  .site-footer {
+    border-top: 1px solid var(--border);
+    padding: 56px 0 28px;
+    margin-top: 40px;
+  }
+  .cols {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1fr;
+    gap: 40px;
+  }
+  .about p { color: var(--text-2); font-size: 14px; margin-top: 14px; max-width: 320px; }
+  h4 {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    margin-bottom: 14px;
+  }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+  ul a { color: var(--text-2); font-size: 14px; }
+  ul a:hover { color: var(--text); }
+  .base {
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  @media (max-width: 720px) {
+    .cols { grid-template-columns: 1fr 1fr; }
+    .about { grid-column: 1 / -1; }
+  }
+</style>

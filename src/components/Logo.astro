@@ -1,0 +1,21 @@
+---
+interface Props { size?: number }
+const { size = 21 } = Astro.props;
+---
+<a href="/" class="logo" style={`font-size:${size}px`} aria-label="LLM Inference Book, home">
+  <span class="brace">{'{'}</span><span class="core">llm</span><span class="brace">{'}'}</span><span class="tail">inference</span>
+</a>
+<style>
+  .logo {
+    font-family: var(--font-head);
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    color: var(--text);
+    text-decoration: none !important;
+    white-space: nowrap;
+    line-height: 1;
+  }
+  .brace, .core { color: var(--text); }
+  .brace { font-weight: 600; }
+  .tail { color: var(--accent-text); }
+</style>
