@@ -1,0 +1,51 @@
+---
+// Coloured box for a key idea, example, analogy, warning, note or real-world fact.
+type Kind = 'idea' | 'example' | 'analogy' | 'warning' | 'note' | 'real';
+interface Props { type?: Kind; title?: string }
+const { type = 'note', title } = Astro.props;
+const labels: Record<Kind, string> = {
+  idea: 'Key idea',
+  example: 'Example',
+  analogy: 'Simple picture',
+  warning: 'Watch out',
+  note: 'Note',
+  real: 'In real systems',
+};
+---
+<aside class={`callout callout-${type}`}>
+  <div class="head">
+    <span class="label">{labels[type]}</span>
+    {title && <span class="title">{title}</span>}
+  </div>
+  <div class="body"><slot /></div>
+</aside>
+<style>
+  .callout {
+    --c: var(--accent-text);
+    --c-soft: var(--accent-soft);
+    margin: 1.8em 0;
+    padding: 18px 20px;
+    border-radius: var(--radius);
+    background: var(--c-soft);
+    border: 1px solid color-mix(in srgb, var(--c) 22%, transparent);
+    border-left: 3px solid var(--c);
+    font-size: 0.96em;
+  }
+  .callout-example { --c: var(--green); --c-soft: var(--green-soft); }
+  .callout-analogy { --c: var(--violet); --c-soft: var(--violet-soft); }
+  .callout-warning { --c: var(--amber); --c-soft: var(--amber-soft); }
+  .callout-note { --c: var(--text-2); --c-soft: var(--surface-3); }
+  .callout-real { --c: var(--teal); --c-soft: var(--teal-soft); }
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
+  .label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--c);
+  }
+  .title { font-family: var(--font-head); font-weight: 700; font-size: 1.02em; color: var(--text); }
+  .body > :global(* + *) { margin-top: 0.8em; }
+  .body :global(p:first-child) { margin-top: 0; }
+</style>

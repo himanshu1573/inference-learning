@@ -1,0 +1,48 @@
+---
+// A numbered illustration with a caption. Put an SVG figure component inside.
+interface Props { n: string; caption: string; title?: string }
+const { n, caption, title } = Astro.props;
+---
+<figure class="fig card">
+  {title && (
+    <div class="fig-head">
+      <span class="fig-n">Fig. {n}</span>
+      <span class="fig-title">{title}</span>
+    </div>
+  )}
+  <div class="fig-body"><slot /></div>
+  <figcaption>{!title && <span class="fig-n">Fig. {n}</span>} {caption}</figcaption>
+</figure>
+<style>
+  .fig {
+    margin: 2.2em 0;
+    overflow: hidden;
+  }
+  .fig-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    padding: 14px 20px 0;
+  }
+  .fig-title { font-family: var(--font-head); font-weight: 700; font-size: 0.95em; color: var(--text); }
+  .fig-n {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+  .fig-body { padding: 16px 20px; }
+  figcaption {
+    padding: 12px 20px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--surface-3);
+    font-size: 0.86em;
+    line-height: 1.6;
+    color: var(--text-2);
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  }
+  figcaption .fig-n { margin-right: 6px; }
+</style>

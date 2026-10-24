@@ -1,0 +1,91 @@
+---
+// A step-by-step derivation. Put an ordered list inside; each item is one step.
+interface Props { title: string; result?: string }
+const { title, result } = Astro.props;
+---
+<section class="derivation card">
+  <header>
+    <span class="tag-d">Derivation</span>
+    <h4>{title}</h4>
+  </header>
+  <div class="steps"><slot /></div>
+  {result && <footer><span class="r-label">Result</span><span class="r-text" set:html={result} /></footer>}
+</section>
+<style>
+  .derivation {
+    margin: 2em 0;
+    overflow: hidden;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-3);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 14px;
+  }
+  .tag-d {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--on-accent);
+    background: var(--accent);
+    padding: 3px 8px;
+    border-radius: 5px;
+  }
+  h4 { font-size: 1em; font-weight: 700; margin: 0 !important; }
+  .steps { padding: 6px 20px 10px; }
+  .steps :global(ol) {
+    list-style: none;
+    counter-reset: step;
+    padding: 0;
+    margin: 0;
+  }
+  .steps :global(ol > li) {
+    counter-increment: step;
+    position: relative;
+    padding: 14px 0 14px 46px;
+    margin: 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .steps :global(ol > li:last-child) { border-bottom: 0; }
+  .steps :global(ol > li::before) {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 14px;
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: 1.5px solid var(--accent);
+    color: var(--accent-text);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    background: var(--surface);
+  }
+  .steps :global(ol > li > * + *) { margin-top: 0.5em; }
+  .steps :global(.katex-display) { margin: 0.5em 0 !important; }
+  footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 14px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--accent-soft);
+  }
+  .r-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent-text);
+    font-weight: 600;
+  }
+  .r-text { font-weight: 600; color: var(--text); }
+</style>

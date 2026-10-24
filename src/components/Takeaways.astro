@@ -1,0 +1,28 @@
+---
+// End-of-chapter summary. Put a bullet list inside.
+interface Props { title?: string }
+const { title = 'Remember these points' } = Astro.props;
+---
+<section class="takeaways bracket card">
+  <span class="eyebrow">Chapter summary</span>
+  <h3>{title}</h3>
+  <div class="tk-body"><slot /></div>
+</section>
+<style>
+  .takeaways { margin: 3em 0 2em; padding: 22px 24px; background: var(--surface); }
+  h3 { margin: 8px 0 6px !important; font-size: 1.2em; }
+  .tk-body :global(ul) { padding-left: 0; list-style: none; margin: 0; }
+  .tk-body :global(li) { position: relative; padding: 9px 0 9px 28px; border-top: 1px dashed var(--border); margin: 0 !important; }
+  .tk-body :global(li:first-child) { border-top: 0; }
+  .tk-body :global(li::before) {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 0.95em;
+    width: 12px;
+    height: 7px;
+    border-left: 2px solid var(--accent);
+    border-bottom: 2px solid var(--accent);
+    transform: rotate(-45deg);
+  }
+</style>

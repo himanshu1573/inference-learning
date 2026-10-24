@@ -1,0 +1,38 @@
+---
+// A collapsible "go deeper" section. Beginners can skip it; curious readers open it.
+interface Props { title: string; level?: 'Advanced' | 'Expert' }
+const { title, level = 'Advanced' } = Astro.props;
+---
+<details class="deep-dive">
+  <summary>
+    <span class="dd-tag mono">Deep dive · {level}</span>
+    <span class="dd-title">{title}</span>
+    <span class="dd-hint mono">Optional · click to open</span>
+  </summary>
+  <div class="dd-body"><slot /></div>
+</details>
+<style>
+  .deep-dive {
+    margin: 2em 0;
+    border: 1px dashed var(--violet);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--violet-soft) 60%, var(--surface));
+  }
+  summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 12px;
+    padding: 14px 18px;
+    cursor: pointer;
+    list-style: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  .dd-tag { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--violet); }
+  .dd-title { font-family: 'Inter', ui-sans-serif, sans-serif; font-weight: 700; flex: 1; min-width: 200px; }
+  .dd-hint { font-size: 11px; color: var(--text-3); }
+  details[open] .dd-hint { display: none; }
+  details[open] summary { border-bottom: 1px dashed var(--violet); }
+  .dd-body { padding: 4px 18px 18px; }
+  .dd-body > :global(* + *) { margin-top: 1em; }
+</style>

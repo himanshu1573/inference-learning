@@ -1,0 +1,33 @@
+---
+// A row of big numbers, e.g. "16 GB · weights".
+interface Props { items: { value: string; label: string }[] }
+const { items } = Astro.props;
+---
+<div class="key-numbers" style={`--n:${items.length}`}>
+  {items.map((it) => (
+    <div class="kn">
+      <span class="v">{it.value}</span>
+      <span class="l">{it.label}</span>
+    </div>
+  ))}
+</div>
+<style>
+  .key-numbers {
+    display: grid;
+    grid-template-columns: repeat(var(--n), minmax(0, 1fr));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    margin: 1.8em 0;
+    overflow: hidden;
+  }
+  .kn { padding: 16px 18px; border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+  .kn:first-child { border-left: 0; }
+  .v { font-family: var(--font-mono); font-size: 1.35em; font-weight: 600; color: var(--accent-text); line-height: 1.2; }
+  .l { font-size: 0.8em; color: var(--text-2); line-height: 1.4; font-family: 'Inter', ui-sans-serif, sans-serif; }
+  @media (max-width: 640px) {
+    .key-numbers { grid-template-columns: 1fr 1fr; }
+    .kn:nth-child(odd) { border-left: 0; }
+    .kn:nth-child(n + 3) { border-top: 1px solid var(--border); }
+  }
+</style>
