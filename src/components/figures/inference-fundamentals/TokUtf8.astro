@@ -1,0 +1,38 @@
+---
+// Characters become 1 to 4 bytes in UTF-8.
+const chars = [
+  { c: 'a', name: 'Latin letter', bytes: ['61'] },
+  { c: 'é', name: 'Latin with accent', bytes: ['C3', 'A9'] },
+  { c: 'न', name: 'Hindi letter', bytes: ['E0', 'A4', 'A8'] },
+  { c: '😀', name: 'Emoji', bytes: ['F0', '9F', '98', '80'] },
+];
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="UTF-8: the letter a is one byte, é is two bytes, a Hindi letter is three bytes, an emoji is four bytes">
+  <defs>
+    <marker id="u8-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <text x="16" y="22" class="t3 mono" font-size="10.5">CHARACTER</text>
+  <text x="300" y="22" class="t3 mono" font-size="10.5">UTF-8 BYTES (hex)</text>
+  {chars.map((c, i) => (
+    <g>
+      <rect x="16" y={34 + i * 52} width="44" height="40" rx="8" class="box" />
+      <text x="38" y={61 + i * 52} class="t" font-size="20" text-anchor="middle">{c.c}</text>
+      <text x="72" y={52 + i * 52} class="t" font-size="12" font-weight="600">{c.name}</text>
+      <text x="72" y={67 + i * 52} class="t3" font-size="10.5">{c.bytes.length} byte{c.bytes.length > 1 ? 's' : ''}</text>
+      <path d={`M222 ${54 + i * 52} H288`} class="line-a" stroke-width="1.5" marker-end="url(#u8-arrow)" />
+      {c.bytes.map((b, j) => (
+        <g>
+          <rect x={300 + j * 58} y={38 + i * 52} width="50" height="32" rx="6" class="box-a" />
+          <text x={325 + j * 58} y={59 + i * 52} class="ta mono" font-size="13" font-weight="600" text-anchor="middle">{b}</text>
+        </g>
+      ))}
+    </g>
+  ))}
+  <text x="540" y="70" class="t2" font-size="11">Every possible text is</text>
+  <text x="540" y="86" class="t2" font-size="11">a list of bytes, and</text>
+  <text x="540" y="102" class="t2" font-size="11">there are only 256</text>
+  <text x="540" y="118" class="t2" font-size="11">different byte values.</text>
+  <text x="540" y="146" class="ta" font-size="11" font-weight="600">So a byte-level tokenizer</text>
+  <text x="540" y="162" class="ta" font-size="11" font-weight="600">never meets an unknown</text>
+  <text x="540" y="178" class="ta" font-size="11" font-weight="600">character.</text>
+</svg>

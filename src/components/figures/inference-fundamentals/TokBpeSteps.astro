@@ -1,0 +1,40 @@
+---
+// BPE training on a tiny corpus: three merges, step by step.
+const words = ['hug ×10', 'pug ×5', 'pun ×12', 'bun ×4', 'hugs ×5'];
+const steps = [
+  { title: 'Start: single letters', merge: '', rows: [['h', 'u', 'g'], ['p', 'u', 'g'], ['p', 'u', 'n'], ['b', 'u', 'n'], ['h', 'u', 'g', 's']], best: 'u + g → 20' },
+  { title: 'Merge 1: u + g → ug', merge: 'ug', rows: [['h', 'ug'], ['p', 'ug'], ['p', 'u', 'n'], ['b', 'u', 'n'], ['h', 'ug', 's']], best: 'u + n → 16' },
+  { title: 'Merge 2: u + n → un', merge: 'un', rows: [['h', 'ug'], ['p', 'ug'], ['p', 'un'], ['b', 'un'], ['h', 'ug', 's']], best: 'h + ug → 15' },
+  { title: 'Merge 3: h + ug → hug', merge: 'hug', rows: [['hug'], ['p', 'ug'], ['p', 'un'], ['b', 'un'], ['hug', 's']], best: 'next: p + un → 12' },
+];
+const colW = 154;
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Byte pair encoding training: each step merges the most frequent pair of symbols into a new token">
+  <text x="16" y="20" class="t3 mono" font-size="10">CORPUS</text>
+  {words.map((w, i) => <text x="16" y={66 + i * 34} class="t2 mono" font-size="10.5">{w}</text>)}
+  {steps.map((s, k) => (
+    <g>
+      <text x={84 + k * colW} y="20" class={k === 0 ? 't3 mono' : 'ta mono'} font-size="10" font-weight="600">{k === 0 ? 'STEP 0' : `STEP ${k}`}</text>
+      <text x={84 + k * colW} y="36" class="t" font-size="11" font-weight="700">{s.title}</text>
+      {s.rows.map((r, i) => {
+        let x = 84 + k * colW;
+        return r.map((p) => {
+          const w = p.length * 8.5 + 12;
+          const isNew = s.merge !== '' && p === s.merge;
+          const g = (
+            <g>
+              <rect x={x} y={52 + i * 34} width={w} height="22" rx="5" class={isNew ? 'box-a' : 'box'} />
+              <text x={x + w / 2} y={67 + i * 34} class={isNew ? 'ta mono' : 't mono'} font-size="11.5" font-weight={isNew ? '700' : '400'} text-anchor="middle">{p}</text>
+            </g>
+          );
+          x += w + 3;
+          return g;
+        });
+      })}
+      <rect x={84 + k * colW} y="226" width="146" height="44" rx="7" class="box2" />
+      <text x={92 + k * colW} y="243" class="t3" font-size="9.5">most frequent pair now</text>
+      <text x={92 + k * colW} y="261" class="ta mono" font-size="11" font-weight="700">{s.best}</text>
+    </g>
+  ))}
+  <text x="84" y="292" class="t3" font-size="10.5">Vocabulary after 3 merges: b g h n p s u + ug un hug  (7 letters + 3 new tokens)</text>
+</svg>

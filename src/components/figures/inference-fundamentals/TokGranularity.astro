@@ -1,0 +1,31 @@
+---
+// Three ways to cut text: characters, whole words, subwords.
+const rows = [
+  { name: 'Characters', parts: ['u', 'n', 'b', 'e', 'l', 'i', 'e', 'v', 'a', 'b', 'l', 'e'], note: '12 tokens · tiny vocabulary · very long sequences', cls: 'box' },
+  { name: 'Whole words', parts: ['unbelievable'], note: '1 token · but a new or rare word has no ID at all', cls: 'amber' },
+  { name: 'Subwords (BPE)', parts: ['un', 'believ', 'able'], note: '3 tokens · common pieces are reused in many words', cls: 'box-a' },
+];
+const cw = 8.2;
+---
+<svg viewBox="0 0 720 260" role="img" aria-label="The word unbelievable cut into characters, as one whole word, and into subword pieces">
+  {rows.map((r, i) => {
+    let x = 170;
+    return (
+      <g>
+        <text x="16" y={52 + i * 74} class="t" font-size="13" font-weight="700">{r.name}</text>
+        {r.parts.map((p) => {
+          const w = Math.max(p.length * cw + 14, 24);
+          const g = (
+            <g>
+              <rect x={x} y={34 + i * 74} width={w} height="28" rx="6" class={r.cls} />
+              <text x={x + w / 2} y={53 + i * 74} class="t mono" font-size="13" text-anchor="middle">{p}</text>
+            </g>
+          );
+          x += w + 5;
+          return g;
+        })}
+        <text x="170" y={80 + i * 74} class="t2" font-size="11">{r.note}</text>
+      </g>
+    );
+  })}
+</svg>

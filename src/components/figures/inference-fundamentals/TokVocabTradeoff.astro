@@ -1,0 +1,28 @@
+---
+// Bigger vocabulary: fewer tokens per text, but bigger embedding and output tables.
+const rows = [
+  { name: 'Llama 2 · 32,000 tokens', table: 0.262, tokens: 100 },
+  { name: 'Llama 3 · 128,256 tokens', table: 1.051, tokens: 85 },
+];
+const tableScale = 230; // px per GB
+const tokScale = 2.2; // px per token
+---
+<svg viewBox="0 0 720 250" role="img" aria-label="Comparison: a bigger vocabulary gives fewer tokens for the same text but a bigger embedding table">
+  <text x="16" y="24" class="t" font-size="13" font-weight="700">Tokens for the same English text</text>
+  <text x="380" y="24" class="t" font-size="13" font-weight="700">Size of one table (embedding or LM head)</text>
+  {rows.map((r, i) => (
+    <g>
+      <text x="16" y={58 + i * 70} class="t2" font-size="11">{r.name}</text>
+      <rect x="16" y={66 + i * 70} width={r.tokens * tokScale} height="22" rx="4" class={i === 1 ? 'box-a' : 'box2'} />
+      <text x={24 + r.tokens * tokScale} y={82 + i * 70} class="ta mono" font-size="11.5" font-weight="700">{r.tokens}{i === 1 ? ' (up to ~15% fewer)' : ''}</text>
+      <text x="380" y={58 + i * 70} class="t2" font-size="11">hidden size 4096 · BF16</text>
+      <rect x="380" y={66 + i * 70} width={r.table * tableScale} height="22" rx="4" class={i === 1 ? 'amber' : 'box2'} />
+      <text x={388 + r.table * tableScale} y={82 + i * 70} class="tam mono" font-size="11.5" font-weight="700">{r.table.toFixed(2)} GB</text>
+    </g>
+  ))}
+  <text x="16" y="200" class="t3" font-size="10.5">Fewer tokens = less work in prefill and decode,</text>
+  <text x="16" y="215" class="t3" font-size="10.5">and more text fits in the same context window.</text>
+  <text x="380" y="200" class="t3" font-size="10.5">More rows to store, and the LM head does more</text>
+  <text x="380" y="215" class="t3" font-size="10.5">math for every single output token.</text>
+  <text x="16" y="242" class="t3" font-size="10">Token counts are relative (Llama 2 = 100). Meta reports up to ~15% fewer tokens with the Llama 3 tokenizer.</text>
+</svg>

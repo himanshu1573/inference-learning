@@ -1,0 +1,24 @@
+---
+// The same greeting in four languages: characters vs UTF-8 bytes.
+const rows = [
+  { lang: 'English', text: 'Hello, how are you?', chars: 19, bytes: 19 },
+  { lang: 'Spanish', text: '¿Hola, cómo estás?', chars: 18, bytes: 21 },
+  { lang: 'Hindi', text: 'नमस्ते, आप कैसे हैं?', chars: 20, bytes: 50 },
+  { lang: 'Chinese', text: '你好，你好吗？', chars: 7, bytes: 21 },
+];
+const s = 6.4;
+---
+<svg viewBox="0 0 720 240" role="img" aria-label="The same greeting needs 19 bytes in English, 21 in Spanish, 50 in Hindi and 21 in Chinese">
+  <text x="16" y="22" class="t3 mono" font-size="10">LANGUAGE</text>
+  <text x="300" y="22" class="t3 mono" font-size="10">UTF-8 BYTES (what a byte-level tokenizer starts from)</text>
+  {rows.map((r, i) => (
+    <g>
+      <text x="16" y={56 + i * 46} class="t" font-size="12.5" font-weight="700">{r.lang}</text>
+      <text x="16" y={72 + i * 46} class="t2" font-size="11.5">{r.text}</text>
+      <rect x="300" y={44 + i * 46} width={r.bytes * s} height="24" rx="4" class={r.lang === 'Hindi' ? 'amber' : 'box-a'} />
+      <text x={308 + r.bytes * s} y={61 + i * 46} class={r.lang === 'Hindi' ? 'tam mono' : 'ta mono'} font-size="11.5" font-weight="700">{r.bytes} bytes</text>
+      <text x={308 + r.bytes * s} y={74 + i * 46} class="t3 mono" font-size="9.5" dy="0">{r.chars} chars</text>
+    </g>
+  ))}
+  <text x="16" y="232" class="t3" font-size="10.5">More bytes, and fewer learned merges for that language, usually means more tokens for the same meaning.</text>
+</svg>
