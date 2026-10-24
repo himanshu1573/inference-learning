@@ -1,0 +1,383 @@
+---
+title: 'Why LLMs Run on GPUs'
+description: 'What an LLM really computes for each token, why that work splits perfectly into thousands of small pieces, and why a GPU does it much faster than a CPU.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import WhyGpuMatVec from '../../../components/figures/gpu-hardware/WhyGpuMatVec.astro';
+import WhyGpuParallelRows from '../../../components/figures/gpu-hardware/WhyGpuParallelRows.astro';
+import WhyGpuCpuVsGpu from '../../../components/figures/gpu-hardware/WhyGpuCpuVsGpu.astro';
+import WhyGpuSpecBars from '../../../components/figures/gpu-hardware/WhyGpuSpecBars.astro';
+
+In the last chapter, we saw that an LLM writes one token at a time, and that each token uses all of the model's weights. Now we ask a simple question: **what kind of computer is best for this work?** The answer is the GPU. In this chapter, you will see exactly why, with real numbers. You will also see the surprising part: for one user, the GPU is fast mostly because of its **memory**, not only because of its math.
+
+<NewWords
+  words={[
+    { word: 'Vector', meaning: 'A list of numbers. For example, one token inside the model is a vector of 4,096 numbers.' },
+    { word: 'Matrix', meaning: 'A table of numbers with rows and columns. The weights of a model are stored as matrices.' },
+    { word: 'Matrix-vector multiply', meaning: 'Combining a matrix with a vector to get a new vector. This is the main work an LLM does.' },
+    { word: 'FLOP', meaning: 'One floating-point operation: one multiply or one add of two decimal numbers.' },
+    { word: 'FLOPS', meaning: 'FLOPs per second. It measures how fast a chip can do math. 1 TFLOPS = 10¹² FLOPs per second.' },
+    { word: 'Core', meaning: 'One part of a chip that can run instructions. A chip can have many cores working at the same time.' },
+    { word: 'Latency', meaning: 'How long one task takes from start to end.' },
+    { word: 'Throughput', meaning: 'How much work is finished per second, counting all tasks together.' },
+    { word: 'Memory bandwidth', meaning: 'How many bytes per second can move between the memory and the chip.' },
+    { word: 'Parallel', meaning: 'Done at the same time by many workers, instead of one after another.' },
+  ]}
+/>
+
+## What one token really costs
+
+Let us look inside the model for a moment. When a token enters the model, it is not text anymore. It is a **vector**: a list of numbers. In Llama 3.1 8B, every token is a list of **4,096 numbers**. This size is called the **hidden size**.
+
+Each layer of the model takes this vector and multiplies it by big tables of weights (the **matrices**). For example, the first step of attention in Llama 3.1 8B multiplies the token vector by a matrix with **4,096 rows and 4,096 columns**. That one matrix has about 16.8 million weights.
+
+This operation is called a **matrix-vector multiply**. It is the most important operation in this whole book, so let us understand it well.
+
+<Figure n="2.1" title="One matrix-vector multiply" caption="The weight matrix W has 4,096 rows. To get one number of the output y, we take one row of W, multiply each weight by the matching input number, and add all the results together. We do this for all 4,096 rows.">
+  <WhyGpuMatVec />
+</Figure>
+
+Here is the recipe for **one** output number:
+
+1. Take one row of the matrix. It has 4,096 weights.
+2. Multiply each weight by the matching number in the input vector. That is 4,096 multiplies.
+3. Add all 4,096 results together into one number. That is about 4,096 adds.
+
+Then repeat this for every row. With 4,096 rows, we get 4,096 output numbers: a new vector, ready for the next step.
+
+<Derivation title="FLOPs for one 4,096 × 4,096 matrix-vector multiply" result="About 33.5 million FLOPs, which is exactly 2 FLOPs for every weight in the matrix.">
+
+1. Work for one row: one multiply and one add for each of its 4,096 weights.
+
+   $$
+   2 \times 4{,}096 = 8{,}192 \text{ FLOPs}
+   $$
+
+2. The matrix has 4,096 rows, and each row does the same work.
+
+   $$
+   4{,}096 \times 8{,}192 = 33{,}554{,}432 \text{ FLOPs}
+   $$
+
+3. Now compare with the number of weights in the matrix.
+
+   $$
+   4{,}096 \times 4{,}096 = 16{,}777{,}216 \text{ weights}
+   $$
+
+4. Divide FLOPs by weights.
+
+   $$
+   \frac{33{,}554{,}432}{16{,}777{,}216} = 2
+   $$
+
+</Derivation>
+
+This is where the famous rule comes from: **every weight is used once per token, for one multiply and one add.** So for the whole model:
+
+$$
+\text{FLOPs per token} \approx 2 \times P
+$$
+
+where $P$ is the number of parameters. For Llama 3.1 8B, that is about $2 \times 8 \times 10^{9} = 16 \times 10^{9}$ FLOPs, or **16 GFLOPs per token**.
+
+<Callout type="example" title="How big is 16 GFLOPs?">
+
+Imagine a person who can do one multiply-and-add per second, without any break. To do the math for **one single token**, they would need 8 billion seconds. That is about **250 years**. A modern GPU does it in a tiny part of a millisecond. And an answer has hundreds of tokens.
+
+</Callout>
+
+<DeepDive title="Where do Llama 3.1 8B's 8 billion weights really live?">
+
+Let us check the 2 × P rule with the real shapes of Llama 3.1 8B. Each of the 32 layers has these matrices:
+
+| Matrix | Shape | Weights |
+| --- | --- | --- |
+| Query projection (q) | 4,096 × 4,096 | <span class="num">16.8 M</span> |
+| Key projection (k) | 4,096 × 1,024 | <span class="num">4.2 M</span> |
+| Value projection (v) | 4,096 × 1,024 | <span class="num">4.2 M</span> |
+| Output projection (o) | 4,096 × 4,096 | <span class="num">16.8 M</span> |
+| MLP gate | 4,096 × 14,336 | <span class="num">58.7 M</span> |
+| MLP up | 4,096 × 14,336 | <span class="num">58.7 M</span> |
+| MLP down | 14,336 × 4,096 | <span class="num">58.7 M</span> |
+| **One layer, total** | | <span class="num">218.1 M</span> |
+
+(The key and value matrices are smaller because Llama 3.1 8B shares keys and values between heads. We explain this in Phase 2.)
+
+All 32 layers together:
+
+$$
+32 \times 218.1 \text{ M} \approx 6.98 \text{ billion}
+$$
+
+The rest are two big tables at the start and the end: the **embedding table** (it turns a token ID into a vector) and the **output head** (it turns the final vector into 128,256 scores). Each one is $128{,}256 \times 4{,}096 \approx 0.53$ billion weights. Total: $6.98 + 0.53 + 0.53 \approx 8.03$ billion. That matches the name "8B".
+
+One small detail: the embedding table is not multiplied. The model just **looks up** one row for each token. So the real matrix math per token is a bit less than $2P$:
+
+$$
+2 \times (6.98 + 0.53) \times 10^{9} \approx 15 \text{ GFLOPs}
+$$
+
+That is close to 16, so the simple $2P$ rule is good enough for estimates. Attention also adds some extra work that grows with the length of the text. We will add it in Phase 2.
+
+</DeepDive>
+
+## The work splits perfectly
+
+Look again at the matrix-vector multiply. To compute row 3, do you need the answer of row 2? **No.** Every row only needs its own weights and the input vector. The rows do not depend on each other at all.
+
+This means we can give each row to a different worker, and all workers can work **at the same time**. Work like this is called **parallel** work. When the pieces are fully independent, people sometimes call it *embarrassingly parallel*, because it is so easy to split.
+
+<Figure n="2.2" title="Same work, more workers" caption="With one worker, the 8 rows are done one after another. With 8 workers, each does one row, and all of them finish in a single time step. A matrix with 4,096 rows can use thousands of workers in the same way.">
+  <WhyGpuParallelRows />
+</Figure>
+
+And it goes even further. Inside one row, the 4,096 multiplies are also independent. Only the final adding needs to collect them. So a matrix-vector multiply can keep **thousands** of workers busy.
+
+<Callout type="idea">
+
+LLM inference is mostly **one simple operation (multiply and add), repeated billions of times, on independent pieces of data.** The best machine for this is not one very smart worker. It is a huge number of simple workers that all do the same thing at the same time.
+
+</Callout>
+
+Remember from chapter 1.1 the important limit: the **tokens** of an answer must be made one after another. But **inside** each token, the work is very parallel. So we need a machine that can do a huge amount of parallel work, very quickly, for each step.
+
+## CPU and GPU: two different designs
+
+Every computer has a **CPU** (Central Processing Unit). It runs your operating system, your browser, your database. A CPU is built to do **one task as fast as possible**. Most programs have many "if this, then that" decisions and steps that depend on each other. For this kind of work, a few very strong cores are best.
+
+A **GPU** (Graphics Processing Unit) was first built to draw video game pictures. A screen has millions of pixels, and the colour of each pixel can be computed **independently**. So the GPU was designed to run thousands of small, simple calculations at the same time. That is exactly the shape of LLM work.
+
+<Figure n="2.3" title="Few strong cores vs thousands of simple cores" caption="A CPU spends its chip area on a few large cores, big caches and smart control logic, so one task finishes quickly. A GPU spends its area on thousands of simple cores grouped into SMs (Streaming Multiprocessors), so many tasks finish at once.">
+  <WhyGpuCpuVsGpu />
+</Figure>
+
+<Callout type="analogy" title="Sports car vs bus">
+
+A **CPU is like a sports car**. It carries 2 people from A to B very fast. A **GPU is like a big bus**. Each trip is a little slower, but it carries 100 people at once. If you need to move 10,000 people, the bus wins easily. LLM inference is "moving 10,000 people": billions of multiply-adds per token.
+
+</Callout>
+
+The CPU and the GPU are tuned for two different goals:
+
+- **Latency**: how long one task takes. The CPU is designed to make this small.
+- **Throughput**: how much total work is done per second. The GPU is designed to make this big.
+
+| | CPU | GPU |
+| --- | --- | --- |
+| Number of cores | about 16 to 128 strong cores | thousands of simple cores |
+| Good at | branchy code, one task fast | the same math on lots of data |
+| Design goal | low latency | high throughput |
+| Memory | large (hundreds of GB), slower | smaller (80 to 192 GB), much faster |
+| Typical job | operating system, web server, database | graphics, AI training and inference |
+
+<Callout type="note">
+
+A GPU does not replace the CPU. Every GPU server also has CPUs. The CPU runs the serving program, receives requests, runs the tokenizer and tells the GPU what to do. The GPU does the heavy math. In Phase 3 we will see that a slow CPU side can even become a bottleneck.
+
+</Callout>
+
+## The numbers: CPU vs H100
+
+Let us compare a strong server CPU with the NVIDIA H100, the GPU we use as our main example. For the CPU, we use an **example** server chip with 64 cores and 12 DDR5 memory channels. Real CPUs differ, so treat these CPU numbers as rough.
+
+<Derivation title="Memory bandwidth of the example server CPU" result="About 460 GB/s peak. Real programs usually reach less.">
+
+1. One DDR5-4800 memory channel moves 8 bytes per transfer, at 4,800 million transfers per second.
+
+   $$
+   8 \text{ bytes} \times 4.8 \times 10^{9} \text{ /s} = 38.4 \text{ GB/s}
+   $$
+
+2. The CPU has 12 channels working at the same time.
+
+   $$
+   12 \times 38.4 \text{ GB/s} \approx 460 \text{ GB/s}
+   $$
+
+</Derivation>
+
+The H100 uses a special kind of memory called **HBM** (High Bandwidth Memory). It sits right next to the GPU chip, in the same package, and moves about **3,350 GB/s** (3.35 TB/s). We look at HBM closely in the chapter on the memory hierarchy.
+
+<Figure n="2.4" title="CPU vs H100: math speed, memory speed, decode speed" caption="The H100 is about 200 times faster at math, but only about 7 times faster at reading memory. For one user doing decode, memory speed decides the result, so the GPU is 'only' about 7 times faster here.">
+  <WhyGpuSpecBars />
+</Figure>
+
+Two very different gaps:
+
+- **Math speed:** an H100 does about **989 TFLOPS** with BF16 numbers. The example CPU does perhaps **5 TFLOPS** (a rough number; it depends a lot on the chip and the number format). That is about **200 times** more.
+- **Memory speed:** 3,350 GB/s against 460 GB/s. That is only about **7 times** more.
+
+Which gap matters for LLM decode? Let us calculate the best possible speed for one user on each machine, in the same way as in chapter 1.1.
+
+<Derivation title="Best-case decode speed for Llama 3.1 8B (BF16, one user)" result="CPU: about 29 tokens/s. H100: about 209 tokens/s. The ratio (about 7×) is the ratio of memory speeds, not of math speeds.">
+
+1. Each token must read all weights once: 16 GB.
+
+   $$
+   \text{time per token} = \frac{\text{bytes to read}}{\text{memory bandwidth}}
+   $$
+
+2. On the example CPU:
+
+   $$
+   \frac{16 \times 10^{9}}{460 \times 10^{9}} \approx 0.035 \text{ s} \;\Rightarrow\; \frac{1}{0.035} \approx 29 \text{ tokens/s}
+   $$
+
+3. On the H100:
+
+   $$
+   \frac{16 \times 10^{9}}{3.35 \times 10^{12}} \approx 0.0048 \text{ s} \;\Rightarrow\; \frac{1}{0.0048} \approx 209 \text{ tokens/s}
+   $$
+
+4. Check that math is not the limit on the CPU. The work is 16 GFLOPs per token, and the CPU does about 5 TFLOPS:
+
+   $$
+   \frac{16 \times 10^{9}}{5 \times 10^{12}} \approx 0.0032 \text{ s}
+   $$
+
+   That is about 10 times shorter than the 0.035 s for reading memory. So even on the CPU, **memory is the limit** for one user.
+
+</Derivation>
+
+<Callout type="idea">
+
+For **one user**, decode speed is set by **memory bandwidth**. The GPU wins mostly because its memory is much faster. Its huge math power is mostly **waiting** in this case. Later chapters show how serving engines use this "waiting" power by processing many users at once (batching).
+
+</Callout>
+
+### So where does the 200× math advantage help?
+
+It helps whenever there is a lot of math for each byte read from memory. Two big cases:
+
+1. **Prefill.** The model reads the whole prompt at once. The weights are read once, but used for every prompt token. So the math grows, but the memory reading does not.
+2. **Many users together (batching).** If 64 users each need one token, the weights are read once and used 64 times.
+
+<Derivation title="Prefill of a 2,000-token prompt: CPU vs H100" result="CPU: about 6.4 seconds before the first token. H100: about 0.05 seconds. Here the 200× math gap shows up fully.">
+
+1. Math needed: 16 GFLOPs per token, for 2,000 prompt tokens.
+
+   $$
+   2{,}000 \times 16 \times 10^{9} = 32 \times 10^{12} \text{ FLOPs}
+   $$
+
+2. On the example CPU at 5 TFLOPS (perfect use, which is optimistic):
+
+   $$
+   \frac{32 \times 10^{12}}{5 \times 10^{12}} = 6.4 \text{ s}
+   $$
+
+3. On the H100. Real programs reach maybe 60% of the 989 TFLOPS peak, so use about 600 TFLOPS:
+
+   $$
+   \frac{32 \times 10^{12}}{600 \times 10^{12}} \approx 0.053 \text{ s}
+   $$
+
+</Derivation>
+
+A user waiting 6.4 seconds before the first word, or 0.05 seconds: that is the difference between a bad product and a good one. And with many users, the CPU falls behind even more.
+
+<KeyNumbers
+  items={[
+    { value: '16 GFLOPs', label: 'math per token for Llama 3.1 8B (2 × P)' },
+    { value: '~200×', label: 'H100 math speed vs a server CPU' },
+    { value: '~7×', label: 'H100 memory speed vs a server CPU' },
+    { value: '0.05 s vs 6.4 s', label: 'prefill of 2,000 tokens: H100 vs CPU' },
+  ]}
+/>
+
+## Can you run an LLM on a CPU?
+
+Yes, you can. Projects like **llama.cpp** and **Ollama** run LLMs on normal CPUs and laptops. Many people use them every day. So why do companies still buy GPUs?
+
+Let us calculate with a normal laptop. A laptop with two DDR5 memory channels has a memory bandwidth of roughly **80 to 100 GB/s**. An Apple M1 laptop has about **68 GB/s**.
+
+<Derivation title="Llama 3.1 8B on a laptop" result="BF16: about 4 tokens/s. 4-bit: about 14 tokens/s. Usable for one person, far too slow for a service.">
+
+1. In BF16 (16 GB of weights), on a laptop with 68 GB/s:
+
+   $$
+   \frac{16 \text{ GB}}{68 \text{ GB/s}} \approx 0.235 \text{ s per token} \;\Rightarrow\; \approx 4 \text{ tokens/s}
+   $$
+
+2. llama.cpp usually stores weights in about **4–5 bits** instead of 16 bits (this is called **quantization**). The file shrinks to about 4.9 GB:
+
+   $$
+   \frac{4.9 \text{ GB}}{68 \text{ GB/s}} \approx 0.072 \text{ s per token} \;\Rightarrow\; \approx 14 \text{ tokens/s}
+   $$
+
+</Derivation>
+
+Fourteen tokens per second is fine for **one person** chatting with a model. People read at about 4 to 5 words per second. But a service must answer **hundreds or thousands of people at once**, with long prompts. For that, you need the huge memory bandwidth and the huge math power of data-centre GPUs.
+
+<Callout type="real" title="Why smaller numbers make things faster">
+
+The laptop example shows something important. Using 4-bit numbers instead of 16-bit numbers made decode about **3.3 times faster**, because there were 3.3 times fewer bytes to read. The math did not change much. Data-centre engines use the same idea, with formats like FP8 and FP4. The chapter on number formats explains them.
+
+</Callout>
+
+<Callout type="warning" title="Peak numbers are not real numbers">
+
+All the speeds in this chapter are **peak** numbers from data sheets. Real programs never reach 100%. A good LLM engine may reach 60–80% of peak memory bandwidth in decode. When you plan real systems, always leave room for this gap.
+
+</Callout>
+
+## Other chips for AI
+
+NVIDIA GPUs are the most common chips for LLM inference today, mostly because of their software (CUDA) and because every major engine supports them first. But they are not the only option:
+
+- **AMD Instinct GPUs** (like the MI300X) work in the same way, with a lot of fast HBM memory. vLLM and SGLang support them.
+- **Google TPUs** are chips designed only for matrix math. Google uses them for its own models, and you can rent them in Google Cloud.
+- **AWS Trainium and Inferentia**, and chips from other companies, are also built for AI.
+
+They all follow the same ideas you learned here: **many simple math units, and memory that is as fast as possible.** If you understand the GPU, you understand the others too.
+
+## Check yourself
+
+<Quiz n={1} q="A matrix has 4,096 rows and 14,336 columns. How many FLOPs does one matrix-vector multiply with it need?">
+
+2 FLOPs per weight. The matrix has 4,096 × 14,336 ≈ 58.7 million weights, so the multiply needs about **117 million FLOPs**.
+
+</Quiz>
+
+<Quiz n={2} q="Why is a matrix-vector multiply easy to split between many workers?">
+
+Each output number depends only on one row of the matrix and the input vector. No row needs the result of another row, so all rows can be computed at the same time by different workers.
+
+</Quiz>
+
+<Quiz n={3} q="The H100 is about 200 times faster at math than our example CPU. Why is single-user decode only about 7 times faster?">
+
+Because single-user decode is limited by **memory bandwidth**, not by math. Each token must read all 16 GB of weights, and the H100's memory is only about 7 times faster than the CPU's. Most of the GPU's math power is waiting for data.
+
+</Quiz>
+
+<Quiz n={4} q="A new laptop has 120 GB/s memory bandwidth. Estimate the best-case decode speed for Llama 3.1 8B in 4-bit (about 4.9 GB).">
+
+4.9 GB ÷ 120 GB/s ≈ 0.041 s per token, so about **24 tokens per second** at best. Real speed will be a bit lower.
+
+</Quiz>
+
+<Quiz n={5} q="In which situation does the GPU's huge math advantage matter most: one user chatting, or a long prompt being read?">
+
+**A long prompt being read (prefill).** The weights are read once but used for every prompt token, so there is a lot of math per byte. The same is true when many users are served together in a batch.
+
+</Quiz>
+
+<Takeaways>
+
+- The main work of an LLM is **matrix-vector multiply**: every weight is used for one multiply and one add per token, so **FLOPs per token ≈ 2 × P**.
+- This work is **parallel**: rows do not depend on each other, so thousands of simple workers can share it.
+- A **CPU** has a few strong cores for **low latency**. A **GPU** has thousands of simple cores for **high throughput**.
+- An H100 has about **200×** the math speed but only about **7×** the memory speed of a strong server CPU.
+- For **one user**, decode speed = **memory bandwidth ÷ model size**. The big math advantage pays off in **prefill** and when **many users** are batched together.
+
+</Takeaways>
