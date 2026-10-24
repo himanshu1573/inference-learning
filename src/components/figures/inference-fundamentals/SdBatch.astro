@@ -1,0 +1,23 @@
+---
+// Simple model: speedup of speculative decoding vs batch size (8B on H100, α=0.8, k=4, c=0.1).
+const data = [
+  { b: 1, s: 2.4 }, { b: 16, s: 2.4 }, { b: 64, s: 2.27 }, { b: 128, s: 1.31 }, { b: 256, s: 0.71 }, { b: 512, s: 0.62 },
+];
+const X0 = 70, bw = 80, gap = 26, H = 160, maxS = 2.6;
+const y = (s: number) => 210 - (s / maxS) * H;
+---
+<svg viewBox="0 0 720 280" role="img" aria-label="In a simple model, speculative decoding gives about 2.4 times speedup at batch 1 to 16, 2.3 at 64, 1.3 at 128, and becomes slower than normal decode at 256 and 512">
+  <text x="20" y="24" class="t" font-size="13" font-weight="700">Speedup vs batch size (simple model)</text>
+  <path d={`M${X0 - 10} 210 H${X0 + 6 * (bw + gap)}`} class="line" />
+  <path d={`M${X0 - 10} ${y(1)} H${X0 + 6 * (bw + gap)}`} class="line-t" stroke-dasharray="5 4" />
+  <text x={X0 + 6 * (bw + gap) - 4} y={y(1) - 6} class="t2 mono" font-size="10.5" text-anchor="end">1× = no gain</text>
+  {data.map((d, i) => (
+    <g>
+      <rect x={X0 + i * (bw + gap)} y={y(d.s)} width={bw} height={210 - y(d.s)} rx="5" class={d.s >= 1 ? 'green' : 'red'} />
+      <text x={X0 + i * (bw + gap) + bw / 2} y={y(d.s) - 8} class={d.s >= 1 ? 'tg mono' : 'tr mono'} font-size="12.5" font-weight="700" text-anchor="middle">{d.s.toFixed(2)}×</text>
+      <text x={X0 + i * (bw + gap) + bw / 2} y="230" class="t2 mono" font-size="12" text-anchor="middle">batch {d.b}</text>
+    </g>
+  ))}
+  <text x="20" y="256" class="t2" font-size="11.5">Small batches: verify is memory-bound and almost free. Large batches: verifying 5 tokens per user</text>
+  <text x="20" y="272" class="t2" font-size="11.5">makes the step compute-bound, and the rejected guesses waste real math. (Weights only; KV cache ignored.)</text>
+</svg>

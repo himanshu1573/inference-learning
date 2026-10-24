@@ -1,0 +1,25 @@
+---
+// Four ways to make the draft.
+const panels = [
+  { t: 'Draft model', lines: ['a small model with', 'the same tokenizer,', 'e.g. a 1B model', 'for an 8B target'], cls: 'violet', tc: 'tv' },
+  { t: 'Medusa heads', lines: ['extra output heads', 'on the target model:', 'head 2 → token +2,', 'head 3 → token +3'], cls: 'teal', tc: 'tt' },
+  { t: 'EAGLE', lines: ['a tiny model that', "reads the target's", 'hidden features and', 'drafts a tree'], cls: 'box-a', tc: 'ta' },
+  { t: 'N-gram lookup', lines: ['find the last words', 'in the prompt and', 'copy what came next', '(almost free)'], cls: 'green', tc: 'tg' },
+];
+---
+<svg viewBox="0 0 720 230" role="img" aria-label="Four ways to draft tokens: a small draft model, Medusa heads on the target model, EAGLE which drafts from the target's hidden features, and n-gram lookup which copies text from the prompt">
+  {panels.map((p, i) => {
+    const x = 16 + i * 176;
+    return (
+      <g>
+        <rect x={x} y="16" width="164" height="150" rx="12" class={p.cls} />
+        <text x={x + 14} y="44" class={p.tc} font-size="14" font-weight="700">{p.t}</text>
+        {p.lines.map((l, j) => (
+          <text x={x + 14} y={72 + j * 20} class={j < 2 ? 't2' : 't'} font-size="11">{l}</text>
+        ))}
+      </g>
+    );
+  })}
+  <text x="16" y="196" class="t2" font-size="11.5">Left to right: the draft becomes more tied to the target and cheaper to run. N-gram lookup costs almost nothing,</text>
+  <text x="16" y="214" class="t2" font-size="11.5">but it only helps when the answer repeats text from the prompt (summaries, code edits, documents).</text>
+</svg>

@@ -1,0 +1,32 @@
+---
+// Normal decode: one expensive step per token. Speculative: cheap drafts + one verify step.
+const T = 4.8, c = 0.1;
+const pxPerMs = 31;
+const X0 = 110;
+---
+<svg viewBox="0 0 720 270" role="img" aria-label="Normal decode makes 4 tokens in 4 big steps, 19.2 ms. Speculative decoding makes 4 cheap draft guesses and checks them in one big step, giving 4 tokens in about 6.7 ms in this example.">
+  <defs>
+    <marker id="sdi-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="t3" /></marker>
+  </defs>
+  <text x="20" y="26" class="t" font-size="13" font-weight="700">Normal decode</text>
+  <text x="20" y="44" class="t3" font-size="11">1 token per big step</text>
+  {[0, 1, 2, 3].map((i) => (
+    <g>
+      <rect x={X0 + i * T * pxPerMs} y="56" width={T * pxPerMs - 4} height="36" rx="6" class="box" />
+      <text x={X0 + i * T * pxPerMs + (T * pxPerMs - 4) / 2} y="79" class="t2 mono" font-size="11" text-anchor="middle">target → 1 token</text>
+    </g>
+  ))}
+  <text x={X0 + 4 * T * pxPerMs - 4} y="110" class="t2 mono" font-size="11" text-anchor="end">4 tokens in 19.2 ms</text>
+
+  <text x="20" y="152" class="t" font-size="13" font-weight="700">Speculative</text>
+  <text x="20" y="170" class="t3" font-size="11">guess 4, check all at once</text>
+  {[0, 1, 2, 3].map((i) => (
+    <rect x={X0 + i * T * c * pxPerMs} y="182" width={T * c * pxPerMs - 2} height="36" rx="4" class="violet" />
+  ))}
+  <text x={X0 + 30} y="236" class="tv mono" font-size="10.5" text-anchor="middle">4 drafts</text>
+  <rect x={X0 + 4 * T * c * pxPerMs} y="182" width={T * pxPerMs - 4} height="36" rx="6" class="box-a" />
+  <text x={X0 + 4 * T * c * pxPerMs + (T * pxPerMs - 4) / 2} y="205" class="ta mono" font-size="11" text-anchor="middle" font-weight="700">verify → up to 5</text>
+  <text x={X0 + 4 * T * c * pxPerMs + T * pxPerMs + 6} y="205" class="tg mono" font-size="11.5" font-weight="700">e.g. 4 tokens in 6.7 ms</text>
+  <path d={`M${X0} 250 H700`} class="line-t" marker-end="url(#sdi-arrow)" />
+  <text x="700" y="266" class="t3 mono" font-size="11" text-anchor="end">time (Llama 3.1 8B on H100, draft 10× cheaper)</text>
+</svg>

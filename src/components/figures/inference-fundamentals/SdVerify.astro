@@ -1,0 +1,38 @@
+---
+// One verify step: the target checks all draft tokens in one forward pass.
+const cols = [
+  { d: '“ Paris”', t: '“ Paris”', ok: true },
+  { d: '“.”', t: '“.”', ok: true },
+  { d: '“ It”', t: '“ It”', ok: true },
+  { d: '“ has”', t: '“ is”', ok: false },
+];
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="The draft proposes Paris, period, It, has. The target model agrees with the first three but predicts is instead of has. Three draft tokens are accepted and the target's own token is added, giving four new tokens.">
+  <text x="20" y="26" class="t2" font-size="12">Text so far: <tspan class="t mono" font-weight="600">The capital of France is</tspan></text>
+  <text x="20" y="74" class="tv mono" font-size="11" font-weight="600">DRAFT</text>
+  <text x="20" y="90" class="t3" font-size="10.5">guesses</text>
+  <text x="20" y="144" class="ta mono" font-size="11" font-weight="600">TARGET</text>
+  <text x="20" y="160" class="t3" font-size="10.5">one pass</text>
+  <text x="20" y="214" class="t mono" font-size="11" font-weight="600">RESULT</text>
+  {cols.map((c, i) => {
+    const x = 110 + i * 120;
+    return (
+      <g>
+        <rect x={x} y="56" width="104" height="40" rx="8" class="violet" />
+        <text x={x + 52} y="81" class="tv mono" font-size="12" text-anchor="middle">{c.d}</text>
+        <rect x={x} y="126" width="104" height="40" rx="8" class="box-a" />
+        <text x={x + 52} y="151" class="ta mono" font-size="12" text-anchor="middle">{c.t}</text>
+        <rect x={x} y="196" width="104" height="40" rx="8" class={c.ok ? 'green' : 'red'} />
+        <text x={x + 52} y="221" class={c.ok ? 'tg mono' : 'tr mono'} font-size="12" text-anchor="middle" font-weight="700">{c.ok ? '✓ keep' : '✗ use “ is”'}</text>
+      </g>
+    );
+  })}
+  <rect x="590" y="56" width="104" height="40" rx="8" class="box" stroke-dasharray="4 3" />
+  <text x="642" y="81" class="t3 mono" font-size="11" text-anchor="middle">(no guess)</text>
+  <rect x="590" y="126" width="104" height="40" rx="8" class="box" />
+  <text x="642" y="151" class="t3 mono" font-size="11" text-anchor="middle">not used</text>
+  <rect x="590" y="196" width="104" height="40" rx="8" class="box" stroke-dasharray="4 3" />
+  <text x="642" y="221" class="t3 mono" font-size="10.5" text-anchor="middle">stop here</text>
+  <text x="20" y="268" class="t" font-size="12" font-weight="600">3 draft tokens accepted + 1 token from the target = 4 new tokens for one big step.</text>
+  <text x="20" y="288" class="t3" font-size="11">Everything after the first wrong guess is thrown away, and its KV cache entries are removed.</text>
+</svg>
