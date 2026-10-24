@@ -1,0 +1,591 @@
+---
+title: 'Quantization: GPTQ, AWQ and FP8'
+description: 'Making models smaller and faster by storing numbers with fewer bits: scales and zero points, weight-only vs weight-and-activation, GPTQ, AWQ, SmoothQuant, FP8 and KV cache quantization.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import QzBytesSpeed from '../../../components/figures/inference-fundamentals/QzBytesSpeed.astro';
+import QzNumberLine from '../../../components/figures/inference-fundamentals/QzNumberLine.astro';
+import QzGranularity from '../../../components/figures/inference-fundamentals/QzGranularity.astro';
+import QzDataPath from '../../../components/figures/inference-fundamentals/QzDataPath.astro';
+import QzSmoothQuant from '../../../components/figures/inference-fundamentals/QzSmoothQuant.astro';
+import QzGptqAwq from '../../../components/figures/inference-fundamentals/QzGptqAwq.astro';
+
+In Phase 1 we met the number formats: FP32, BF16, FP8, INT8, FP4. We learned that a model in BF16 uses 2 bytes per weight, and that smaller formats need a **scale**. This chapter is about the practical side: **how do you actually turn a BF16 model into a 4-bit or 8-bit model, without breaking it?** This process is called **quantization**.
+
+Quantization is one of the most useful tools in inference. It is often the single change that makes a model **fit** on your GPU, and it is the main way to make memory-bound decode **faster**.
+
+<NewWords
+  words={[
+    { word: 'Quantization', meaning: 'Storing numbers with fewer bits (for example 4 or 8 instead of 16), using a scale to keep their size.' },
+    { word: 'Scale', meaning: 'A number that converts between the small stored value and the real value: real ≈ stored × scale.' },
+    { word: 'Zero point', meaning: 'An integer that marks where the real value zero sits on the small integer grid. Used in asymmetric quantization.' },
+    { word: 'Weight-only quantization', meaning: 'Only the weights are stored in low bits. Activations and the math stay in 16 bits. Written like W4A16.' },
+    { word: 'Activation', meaning: 'The numbers that flow through the model for the current tokens. They change for every input.' },
+    { word: 'Outlier', meaning: 'A value much bigger than the others. Outliers make quantization hard, because they force a large scale.' },
+    { word: 'Calibration data', meaning: 'A small set of example texts used to measure activations while choosing scales.' },
+    { word: 'Perplexity', meaning: 'A score for how surprised a model is by real text. Lower is better. Used to check quality after quantization.' },
+  ]}
+/>
+
+## Why quantize? Two reasons
+
+### Reason 1: memory
+
+A model must fit in GPU memory, with room left for the KV cache. Llama 3.1 70B in BF16 needs about 141 GB, which does not fit on one 80 GB H100. In 4 bits it needs about 37.5 GB, and it fits easily. Quantization changes **how many GPUs you need**, which changes your cost.
+
+### Reason 2: speed
+
+From the roofline chapter: at small batch sizes, decode is **memory-bound**. The step time is set by how many bytes of weights the GPU must read. If the weights are half as big, the GPU reads them in half the time.
+
+<Figure n="11.1" title="Fewer bytes, faster decode" caption="Llama 3.1 8B on one H100. The time to read all weights once sets the best possible decode step time at small batch sizes. FP8 halves it; INT4 cuts it by about 3.7×. Real speedups are a bit smaller, because of extra work like unpacking 4-bit values and applying scales.">
+  <QzBytesSpeed />
+</Figure>
+
+<Derivation title="Best-case decode speed of Llama 3.1 8B in each format (H100, batch 1)" result="About 209 tokens/s in BF16, 420 in FP8 and 780 in INT4, if the kernels could use the full memory bandwidth.">
+
+1. Bytes to read per step = parameters × bytes per parameter. With 8.03 billion parameters:
+
+   $$
+   \text{BF16: } 8.03 \times 10^{9} \times 2 = 16.06 \text{ GB}
+   $$
+
+   $$
+   \text{FP8: } 8.03 \times 10^{9} \times 1 = 8.03 \text{ GB}
+   $$
+
+2. For INT4 with one 16-bit scale per group of 128 weights, each weight costs a little more than 4 bits (we show why later in this chapter):
+
+   $$
+   4 + \frac{16}{128} = 4.125 \text{ bits} \quad \Rightarrow \quad \text{about } 4.25 \text{ bits with a zero point}
+   $$
+
+   $$
+   8.03 \times 10^{9} \times \frac{4.25}{8} \approx 4.27 \text{ GB}
+   $$
+
+3. Divide each by 3.35 TB/s to get the step time, then take 1 ÷ time.
+
+   $$
+   \frac{16.06}{3{,}350} \approx 4.8 \text{ ms} \Rightarrow 209/\text{s} \qquad \frac{8.03}{3{,}350} \approx 2.4 \text{ ms} \Rightarrow 417/\text{s} \qquad \frac{4.27}{3{,}350} \approx 1.27 \text{ ms} \Rightarrow 785/\text{s}
+   $$
+
+</Derivation>
+
+There is a third, smaller reason. Some formats also make the **math** faster. An H100 does about 989 TFLOPS in BF16 but about 1,979 TFLOPS in FP8. This matters when the work is **compute-bound**: prefill, or decode with a big batch.
+
+## The price: rounding errors
+
+There is no free lunch. A 4-bit number can only take **16 different values**. A 16-bit number can take 65,536. So when we quantize, almost every weight must be **rounded** to a nearby value. Every rounding adds a small error. Billions of small errors can change the model's answers.
+
+<Callout type="analogy" title="Measuring with a cheaper ruler">
+
+Imagine measuring furniture with a ruler that only has a mark every 10 cm. A 73 cm table becomes "70 cm". For moving furniture, that is fine. For building a cupboard, it is not. Quantization is a cheaper ruler for the model's numbers. The art is to put the marks **exactly where they matter most**, so the model still works.
+
+</Callout>
+
+The whole field of quantization is about one question: **how do we choose the scales and the rounding so that the errors hurt the model as little as possible?** Let us start with the basic tools: scale and zero point.
+
+## Scales and zero points, with real numbers
+
+### Symmetric quantization (INT8)
+
+In **symmetric** quantization, zero stays at zero, and the range is the same on both sides: from −max to +max. For INT8, we use the integers from −127 to +127.
+
+$$
+\text{scale} = \frac{\max |w|}{127}, \qquad q = \text{round}\left(\frac{w}{\text{scale}}\right), \qquad \hat{w} = q \times \text{scale}
+$$
+
+Here $w$ is the real weight, $q$ is the stored integer and $\hat{w}$ ("w hat") is the value we get back.
+
+<Derivation title="Quantize 8 weights to INT8 (symmetric)" result="Each weight now takes 1 byte instead of 2. The biggest error is 0.009, less than half a step (0.01).">
+
+1. Start with 8 weights from one row:
+
+   $$
+   w = [\,0.431,\ -1.268,\ 0.087,\ 0.953,\ -0.314,\ 2.540,\ -0.662,\ 0.175\,]
+   $$
+
+2. The biggest absolute value is 2.540. Choose the scale so that 2.540 becomes 127.
+
+   $$
+   \text{scale} = \frac{2.540}{127} = 0.02
+   $$
+
+3. Divide by the scale and round to the nearest integer.
+
+   $$
+   \frac{w}{0.02} = [\,21.55,\ -63.4,\ 4.35,\ 47.65,\ -15.7,\ 127,\ -33.1,\ 8.75\,]
+   $$
+
+   $$
+   q = [\,22,\ -63,\ 4,\ 48,\ -16,\ 127,\ -33,\ 9\,]
+   $$
+
+4. To use the weights, multiply back by the scale.
+
+   $$
+   \hat{w} = [\,0.44,\ -1.26,\ 0.08,\ 0.96,\ -0.32,\ 2.54,\ -0.66,\ 0.18\,]
+   $$
+
+5. The errors $\hat{w} - w$ are:
+
+   $$
+   [\,+0.009,\ +0.008,\ -0.007,\ +0.007,\ -0.006,\ 0,\ +0.002,\ +0.005\,]
+   $$
+
+   Rounding can move a value by at most half a step: $0.02 / 2 = 0.01$.
+
+</Derivation>
+
+INT8 has 255 levels, so its steps are small and the errors are small. Now let us try 4 bits.
+
+### Asymmetric quantization (INT4)
+
+With only 16 levels, we cannot waste any. Our weights go from −1.268 to +2.540: the range is **not** symmetric. If we used −2.540 to +2.540, about a third of the levels (those below −1.268) would never be used.
+
+**Asymmetric** quantization uses the real minimum and maximum. It needs a second number, the **zero point** $z$: the integer that stands for the real value 0. For unsigned INT4, the integers go from 0 to 15.
+
+$$
+\text{scale} = \frac{\max(w) - \min(w)}{15}, \qquad z = \text{round}\left(\frac{-\min(w)}{\text{scale}}\right)
+$$
+
+$$
+q = \text{round}\left(\frac{w}{\text{scale}}\right) + z, \qquad \hat{w} = (q - z) \times \text{scale}
+$$
+
+<Derivation title="Quantize the same 8 weights to INT4 (asymmetric)" result="Each weight now takes half a byte. But the biggest error is 0.100, about 10× bigger than with INT8.">
+
+1. Range of the values:
+
+   $$
+   \max - \min = 2.540 - (-1.268) = 3.808
+   $$
+
+2. Scale (16 levels means 15 steps):
+
+   $$
+   \text{scale} = \frac{3.808}{15} \approx 0.2539
+   $$
+
+3. Zero point:
+
+   $$
+   z = \text{round}\left(\frac{1.268}{0.2539}\right) = \text{round}(4.99) = 5
+   $$
+
+4. Divide by the scale, round, and add $z = 5$:
+
+   $$
+   \text{round}\left(\frac{w}{0.2539}\right) = [\,2,\ -5,\ 0,\ 4,\ -1,\ 10,\ -3,\ 1\,]
+   $$
+
+   $$
+   q = [\,7,\ 0,\ 5,\ 9,\ 4,\ 15,\ 2,\ 6\,]
+   $$
+
+   All values are between 0 and 15, so they fit in 4 bits.
+
+5. Go back: $\hat{w} = (q - 5) \times 0.2539$.
+
+   $$
+   \hat{w} = [\,0.508,\ -1.269,\ 0,\ 1.016,\ -0.254,\ 2.539,\ -0.762,\ 0.254\,]
+   $$
+
+6. The errors are:
+
+   $$
+   [\,+0.077,\ -0.001,\ -0.087,\ +0.063,\ +0.060,\ 0,\ -0.100,\ +0.079\,]
+   $$
+
+   The step is 0.2539, so the biggest possible error is about 0.127.
+
+</Derivation>
+
+<Figure n="11.2" title="Snapping to 16 levels" caption="The 8 example weights (top) and the 16 INT4 levels (bottom). Each weight moves to its nearest level. Level 5 is the real value zero. With only 16 levels, the steps are wide, so the errors are about 10× bigger than with INT8.">
+  <QzNumberLine />
+</Figure>
+
+Look at the third weight: 0.087 became exactly **0**. A small weight was completely erased. With 4 bits, this happens a lot. Good 4-bit methods (GPTQ and AWQ, below) are ways to make these errors hurt less.
+
+<Callout type="note">
+
+FP8 and FP4 work the same way, but the stored values are tiny floating-point numbers instead of integers, so the levels are not evenly spaced: they are closer together near zero. Phase 1 showed every value of FP4 and how one scale is shared by a block. The steps above (find a scale, divide, round, multiply back) are the same.
+
+</Callout>
+
+## How many numbers share one scale?
+
+In the examples, 8 weights shared one scale. In a real model, how many weights should share one? This choice is called **granularity**.
+
+<Figure n="11.3" title="Per-tensor, per-channel and per-group" caption="Each colour is one scale. Per-tensor uses one scale for the whole matrix. Per-channel gives each output row its own scale. Per-group splits every row into groups (usually 128 values) with their own scale. Smaller groups follow the data better but need more scales.">
+  <QzGranularity />
+</Figure>
+
+- **Per-tensor:** one scale for a whole matrix. Very cheap. One big value forces a big scale for everyone. Often good enough for FP8 weights, which have a wide range.
+- **Per-channel:** one scale for each output row. Standard for INT8 weights.
+- **Per-group:** one scale for each group of $g$ values along a row. The common choice for INT4 is $g = 128$.
+
+Scales cost memory too. Let us calculate it for INT4 with groups of 128.
+
+<Derivation title="Real size of a 4-bit Llama 3.1 8B" result="About 4.27 GB if every weight is 4-bit, but about 5.8 GB in practice, because the embedding table and the output layer usually stay in 16 bits.">
+
+1. Each group of 128 weights stores 128 × 4 bits, plus one 16-bit scale and one zero point. If the zero point is also stored as 16 bits:
+
+   $$
+   \frac{128 \times 4 + 16 + 16}{128} = 4.25 \text{ bits per weight}
+   $$
+
+2. If all 8.03 billion weights were quantized:
+
+   $$
+   8.03 \times 10^{9} \times \frac{4.25}{8} \approx 4.27 \text{ GB}
+   $$
+
+3. But two big matrices are usually **not** quantized: the input embedding table and the output layer (the "LM head"). Each is vocabulary × hidden size:
+
+   $$
+   128{,}256 \times 4{,}096 \approx 0.525 \times 10^{9} \text{ parameters each}
+   $$
+
+   Together that is about 1.05 billion parameters, kept in BF16:
+
+   $$
+   1.05 \times 10^{9} \times 2 \approx 2.1 \text{ GB}
+   $$
+
+4. The other $8.03 - 1.05 = 6.98$ billion weights are 4-bit:
+
+   $$
+   6.98 \times 10^{9} \times \frac{4.25}{8} \approx 3.7 \text{ GB}
+   $$
+
+5. Total:
+
+   $$
+   3.7 + 2.1 \approx 5.8 \text{ GB}
+   $$
+
+</Derivation>
+
+This explains a common surprise: you download a "4-bit 8B model" and it is about 5.7 GB, not 4 GB. Now you know where the extra bytes come from.
+
+## Weight-only vs weights and activations
+
+There are two big families of quantization. They are written with a short code: **W** for weights, **A** for activations, and the number of bits.
+
+<Figure n="11.4" title="Two ways to use low-bit numbers" caption="W4A16: weights are stored in 4 bits and expanded to BF16 inside the SM just before the multiply. This cuts the bytes read from HBM, but the math is still BF16. W8A8 (FP8): both inputs are 8-bit, so the GPU can use its 8-bit Tensor Cores, which are twice as fast. This cuts both bytes and math time.">
+  <QzDataPath />
+</Figure>
+
+### Weight-only: W4A16 and W8A16
+
+Only the weights are quantized. Activations stay in BF16. Inside the matrix multiply kernel, the GPU loads the small weights from HBM, **expands** them back to BF16 in registers, and then runs normal BF16 math.
+
+- It cuts the **memory** and the **bytes read** by up to 4× (W4) or 2× (W8).
+- It does **not** make the math faster. In fact, the expanding adds some work.
+- So it is best when decode is **memory-bound**: small batches, like a chatbot with few users, or a local model on a laptop.
+- GPTQ and AWQ are weight-only methods. In vLLM, fast kernels like **Marlin** run W4A16 matrix multiplies.
+
+### Weights and activations: W8A8 (INT8 or FP8)
+
+Both weights and activations are 8-bit. Now the multiply itself can run on the GPU's 8-bit Tensor Cores.
+
+- It halves the bytes of weights.
+- It **doubles** the peak math speed on GPUs with 8-bit Tensor Cores (H100: about 989 → 1,979 TFLOPS).
+- It helps at **all** batch sizes, including large, compute-bound batches.
+- The hard part: activations change for every input and can contain **outliers**. We cannot quantize them once, offline, like weights.
+
+<Callout type="real" title="Which one wins depends on the batch size">
+
+At batch size 1, W4A16 usually gives the fastest decode, because it reads the fewest bytes. At large batch sizes, decode becomes compute-bound, and the extra expanding work of W4A16 can make it **slower** than FP8 W8A8, which uses the fast 8-bit Tensor Cores. This is why serving systems with many users often prefer FP8, while local and low-traffic setups often prefer 4-bit weights.
+
+</Callout>
+
+The newest GPUs (NVIDIA Blackwell) also have 4-bit Tensor Cores, so W4A4 in **FP4** formats like NVFP4 can use faster math too. This is an active area, and quality depends a lot on the method.
+
+## The outlier problem and SmoothQuant
+
+Weights are calm: most are small and close to each other. Activations are not. Researchers found that in large LLMs, a few **channels** (positions in the hidden vector) of the activations have values that can be **tens of times larger** than the rest, and these are the same channels for almost every token.
+
+Why is that a problem? With per-tensor or per-token scaling, the scale must cover the biggest value. One activation of 60 forces a scale so large that normal activations around 1 are rounded to a few levels only, or even to zero. The precision is gone.
+
+**SmoothQuant** (2022) uses a simple and clever trick. A matrix multiply does not change if we divide one input channel of $X$ by a number $s$ and multiply the matching row of $W$ by the same $s$:
+
+$$
+Y = X W = \left(X \cdot \text{diag}(s)^{-1}\right)\left(\text{diag}(s) \cdot W\right)
+$$
+
+So we can **move** some of the difficulty from the activations (hard, quantized at run time) to the weights (easy, quantized once). The scale $s$ for each channel $j$ balances the two:
+
+$$
+s_j = \sqrt{\frac{\max |X_j|}{\max |W_j|}}
+$$
+
+(This is the version with the "migration strength" set to 0.5, the default in the paper.)
+
+<Derivation title="Smoothing one outlier channel" result="Both the activation and the weight now have a maximum of about 5.5 in this channel. Neither has an extreme value, so both quantize well.">
+
+1. In channel $j$, the biggest activation is 60, and the biggest weight in the matching row is 0.5.
+
+2. Compute the smoothing factor:
+
+   $$
+   s_j = \sqrt{\frac{60}{0.5}} = \sqrt{120} \approx 10.95
+   $$
+
+3. New activation maximum:
+
+   $$
+   \frac{60}{10.95} \approx 5.48
+   $$
+
+4. New weight maximum:
+
+   $$
+   0.5 \times 10.95 \approx 5.48
+   $$
+
+5. The product is unchanged: $60 \times 0.5 = 30$ and $5.48 \times 5.48 \approx 30$.
+
+</Derivation>
+
+<Figure n="11.5" title="SmoothQuant moves the outlier into the weights" caption="Before: one activation channel has values around 60, while weights are all below 0.5. After dividing that channel by 10.95 and multiplying the matching weight row by 10.95, both are around 5.5. The model computes exactly the same result, but now both sides are easy to quantize to INT8.">
+  <QzSmoothQuant />
+</Figure>
+
+The division of the activations can be folded into the previous layer (for example, into the RMSNorm weights), so it costs nothing at run time.
+
+## GPTQ and AWQ: smart 4-bit weights
+
+Plain rounding to 4 bits (called **round-to-nearest**, RTN) often hurts quality. Two popular methods do better. Both use a little **calibration data**, usually a few hundred example texts, to see which errors matter.
+
+<Figure n="11.6" title="GPTQ and AWQ" caption="GPTQ quantizes one column of weights at a time and slightly changes the columns that are not quantized yet, so that the layer's output stays close to the original. AWQ looks at activation sizes to find the few important input channels, and scales those weights up before rounding so that rounding hurts them less.">
+  <QzGptqAwq />
+</Figure>
+
+### GPTQ: fix errors as you go
+
+GPTQ (2022) works one layer at a time. Its goal is not to keep each **weight** close to the original. Its goal is to keep each layer's **output** close to the original, on the calibration data.
+
+The idea, in simple words:
+
+1. Quantize the first column of the weight matrix.
+2. This adds an error to the layer's output.
+3. Change the **other, not-yet-quantized** columns a little, so they cancel this error as well as possible.
+4. Move to the next column, and repeat.
+
+To decide **how** to change the other columns, GPTQ uses information about how the inputs are correlated, from the calibration data. (This is the "second-order" information, a matrix built from the inputs, $H = 2XX^{\top}$.) It is fast: the GPTQ paper quantized models with 175 billion parameters in a few GPU hours.
+
+### AWQ: protect the important weights
+
+AWQ (Activation-aware Weight Quantization, 2023) starts from an observation: **not all weights are equally important.** A small fraction of input channels, roughly 1%, matter much more, and you can find them by looking at the **activations**: channels with large activations are the important ones, because their weights are multiplied by big numbers.
+
+Keeping those channels in 16 bits would protect them, but a mixed format is slow on GPUs. So AWQ does something smarter: it **scales** the important channels up before quantization (and scales the activations down by the same factor, like SmoothQuant). After scaling, the rounding error is smaller **relative** to those weights. All weights stay in 4 bits, in one simple format.
+
+| | Round-to-nearest | GPTQ | AWQ |
+| --- | --- | --- | --- |
+| Needs calibration data | No | Yes | Yes |
+| Main idea | round each weight | correct errors in remaining columns | scale up important channels |
+| Typical use | quick tests, FP8 | 4-bit (and 3-bit) weights | 4-bit weights |
+| Run time cost | none | none (same INT4 format) | none (same INT4 format) |
+
+<Callout type="idea">
+
+GPTQ and AWQ change **how the weights are chosen**, not the format. The final file is still "4-bit integers with a scale per group". So the same fast kernels can run both.
+
+</Callout>
+
+## FP8 on H100: the easy win
+
+On Hopper (H100, H200) and newer GPUs, **FP8** is often the first quantization people try for serving:
+
+- Weights in FP8 (usually the E4M3 format), often with **one scale per tensor** or per channel.
+- Activations also in FP8, with scales that are either fixed from calibration (**static**) or computed for each batch while the model runs (**dynamic**).
+- The quality loss is typically **small** for most modern models, because FP8 has a wide range thanks to its exponent bits.
+- It needs no special training and often no calibration: some engines can quantize a BF16 model to FP8 **while loading** it.
+
+```bash
+# vLLM: quantize the weights to FP8 on the fly while loading a BF16 model
+vllm serve meta-llama/Llama-3.1-8B-Instruct --quantization fp8
+```
+
+Many model makers also publish ready FP8 checkpoints, already calibrated.
+
+## Quantizing the KV cache
+
+Weights are not the only big thing in memory. The **KV cache** (see the KV cache chapter) grows with every token and every user. It can also be stored in FP8.
+
+<Derivation title="FP8 KV cache for Llama 3.1 8B" result="64 KiB per token instead of 128 KiB: twice as many tokens fit in the same memory.">
+
+1. KV cache per token in BF16 (32 layers, 8 KV heads, head dimension 128, K and V, 2 bytes):
+
+   $$
+   2 \times 32 \times 8 \times 128 \times 2 = 131{,}072 \text{ bytes} = 128 \text{ KiB}
+   $$
+
+2. In FP8, the last factor becomes 1 byte:
+
+   $$
+   2 \times 32 \times 8 \times 128 \times 1 = 65{,}536 \text{ bytes} = 64 \text{ KiB}
+   $$
+
+3. With 50 GB free for the KV cache:
+
+   $$
+   \frac{50 \times 10^{9}}{131{,}072} \approx 381{,}000 \text{ tokens} \quad \text{vs} \quad \frac{50 \times 10^{9}}{65{,}536} \approx 763{,}000 \text{ tokens}
+   $$
+
+</Derivation>
+
+Twice as many tokens means more users at once, or longer conversations. It also halves the bytes that attention must read in long contexts. In vLLM this is the `--kv-cache-dtype fp8` option. As always, check quality on your own tasks, because some models and long-context tasks are more sensitive to KV cache errors than others.
+
+## GGUF and llama.cpp
+
+If you run models on a laptop or a CPU, you will meet **GGUF**. It is the file format of **llama.cpp**, a popular engine for local inference. One GGUF file holds the weights, the tokenizer and the model settings.
+
+GGUF has many quantization types with names like `Q8_0`, `Q4_0` or `Q4_K_M`. They all use **blocks** with their own scale:
+
+<Derivation title="Bits per weight of two simple GGUF types" result="Q8_0 costs 8.5 bits per weight and Q4_0 costs 4.5 bits per weight.">
+
+1. **Q8_0:** blocks of 32 weights, each weight 8 bits, plus one 16-bit scale per block.
+
+   $$
+   \frac{32 \times 8 + 16}{32} = \frac{272}{32} = 8.5 \text{ bits per weight}
+   $$
+
+2. **Q4_0:** blocks of 32 weights, each weight 4 bits, plus one 16-bit scale per block.
+
+   $$
+   \frac{32 \times 4 + 16}{32} = \frac{144}{32} = 4.5 \text{ bits per weight}
+   $$
+
+</Derivation>
+
+The "K" types (like `Q4_K_M`) are smarter: they group blocks into bigger "super-blocks", store the scales themselves in low bits, and keep some sensitive layers at higher precision. The result is usually better quality for a similar size.
+
+## How much memory and speed do we win?
+
+Here is the full picture for two models. "Read time" is the time to read all weights once at 3.35 TB/s (one H100's bandwidth), which is the best-case decode step at small batch sizes.
+
+| Format | Bits per weight | 8B size | 8B read time | 70B size | 70B read time | 70B fits on one H100? |
+| --- | --- | --- | --- | --- | --- | --- |
+| BF16 | 16 | <span class="num">16.1 GB</span> | <span class="num">4.8 ms</span> | <span class="num">141 GB</span> | <span class="num">42 ms</span> | No |
+| FP8 (W8A8) | ≈ 8 | <span class="num">8.0 GB</span> | <span class="num">2.4 ms</span> | <span class="num">70.6 GB</span> | <span class="num">21 ms</span> | Weights yes, but almost no room for the KV cache |
+| INT4 (W4A16, g128) | ≈ 4.25 | <span class="num">4.3 GB</span> | <span class="num">1.3 ms</span> | <span class="num">37.5 GB</span> | <span class="num">11 ms</span> | Yes, with room for the KV cache |
+
+(Sizes count only the weights and treat every weight as quantized. For 70B in BF16, the read time is for one GPU's bandwidth; in practice it would be split across several GPUs. The chapter "Choosing Hardware" shows the full memory budget.)
+
+<KeyNumbers
+  items={[
+    { value: '2×', label: 'fewer bytes and faster math with FP8 on H100' },
+    { value: '≈ 3.7×', label: 'fewer weight bytes with INT4 (group 128)' },
+    { value: '128 → 64 KiB', label: 'KV cache per token, BF16 → FP8 (8B)' },
+    { value: '≈ 5.8 GB', label: 'real size of a typical 4-bit 8B checkpoint' },
+  ]}
+/>
+
+## How do you know quality is still good?
+
+Never trust quantization blindly. Always measure. There are two main kinds of tests.
+
+### 1. Perplexity
+
+**Perplexity** measures how well the model predicts real text. For each token of a test text, we look at the probability $p$ the model gave to the correct next token. Then:
+
+$$
+\text{PPL} = \exp\left(-\frac{1}{N}\sum_{i=1}^{N} \ln p_i\right)
+$$
+
+<Derivation title="Perplexity in a tiny example" result="If the model always gives probability 0.25 to the right token, the perplexity is 4: it is as unsure as choosing among 4 equal options.">
+
+1. Suppose every correct token gets probability 0.25. Then each $\ln p_i = \ln 0.25 \approx -1.386$.
+
+2. The average of $-\ln p_i$ is 1.386.
+
+3. Perplexity:
+
+   $$
+   \text{PPL} = e^{1.386} = 4
+   $$
+
+</Derivation>
+
+After quantization, perplexity usually goes up a little. A small increase is normal. A big jump means something is broken. Perplexity is cheap to compute, but it does not tell you everything.
+
+### 2. Task evaluations
+
+Run the model on real tasks: knowledge questions (like MMLU), math problems (like GSM8K), coding (like HumanEval), and, most important, **your own use case**. Some abilities are more sensitive than others. Long-context tasks, multi-step reasoning and code are often the first to suffer from aggressive quantization.
+
+<Callout type="warning" title="General rules, not guarantees">
+
+As a rough guide: FP8 is usually close to the original model; good 4-bit methods (GPTQ, AWQ) usually keep most of the quality, especially for larger models; 3-bit and 2-bit lose more. But the loss depends on the model, the method and the task. Always test on your own prompts before you ship a quantized model.
+
+</Callout>
+
+<DeepDive title="Why larger models handle 4 bits better, and why outliers appear">
+
+Two patterns show up again and again in quantization research.
+
+**Larger models are more robust.** A 70B model quantized to 4 bits usually keeps its quality better than an 8B model quantized to 4 bits. One intuition: a large model has more parameters doing similar jobs, so the random errors from rounding tend to cancel out. In a small model, each weight carries more of the work, so each error matters more. This is why "a bigger model in 4 bits" can be better than "a smaller model in 16 bits" for the same memory.
+
+**Outliers grow with scale and training.** The large activation outliers are not random noise. They appear in specific hidden channels and are part of how the model works: for example, some channels seem to act like "switches" that the attention uses. If you clip them, the model breaks. That is why methods do not simply throw outliers away. Instead:
+
+- **LLM.int8()** kept the outlier channels in 16 bits and the rest in 8 bits (mixed precision).
+- **SmoothQuant** moved them into the weights with a per-channel scale.
+- **AWQ** used them to find which weights to protect.
+- Newer methods **rotate** the hidden space (multiply by a special orthogonal matrix, for example a Hadamard matrix) so that one huge value is spread over many channels, making everything smooth. Because the rotation can be undone exactly by the next matrix, the model's output does not change.
+
+All these methods share one idea: **make the distribution of numbers smooth before rounding, without changing what the model computes.**
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="Why does halving the bytes per weight roughly halve the decode time at batch size 1?">
+
+At small batch sizes, decode is memory-bound: the step time is set by reading all the weights from HBM. Half the bytes means half the reading time. The math was never the limit, so making the math faster does not matter here.
+
+</Quiz>
+
+<Quiz n={2} q="The weights [−0.5, 0.2, 1.5] are quantized symmetrically to INT8. What is the scale, and what is the stored value of 0.2?">
+
+The biggest absolute value is 1.5, so scale = 1.5 / 127 ≈ 0.0118. Then 0.2 / 0.0118 ≈ 16.9, which rounds to **17**. Going back: 17 × 0.0118 ≈ 0.201.
+
+</Quiz>
+
+<Quiz n={3} q="You serve a chatbot with hundreds of users at once on H100s. Would you start with W4A16 or FP8 W8A8? Why?">
+
+FP8 W8A8 is the usual first choice. With hundreds of users, batches are large and decode moves toward compute-bound. FP8 halves the weight bytes **and** uses the 2× faster FP8 Tensor Cores. W4A16 reads fewer bytes but still does BF16 math, plus extra work to expand the 4-bit values, so its advantage shrinks or disappears at large batches.
+
+</Quiz>
+
+<Quiz n={4} q="In SmoothQuant, a channel has max activation 40 and max weight 0.1. What is the smoothing factor, and what are the new maxima?">
+
+$s = \sqrt{40 / 0.1} = \sqrt{400} = 20$. New activation max: 40 / 20 = 2. New weight max: 0.1 × 20 = 2. Both sides are now equal and small.
+
+</Quiz>
+
+<Quiz n={5} q="Your 4-bit 8B model file is 5.7 GB, not 4 GB. Name two reasons.">
+
+First, the scales (and zero points) add memory: with groups of 128, each weight costs about 4.25 bits instead of 4. Second, some big parts, usually the embedding table and the output layer, stay in 16 bits; in Llama 3.1 8B these two matrices alone are about 1 billion parameters, or about 2.1 GB.
+
+</Quiz>
+
+<Takeaways>
+
+- **Quantization** stores numbers with fewer bits. It saves **memory** and makes memory-bound decode **faster** (FP8 ≈ 2×, INT4 ≈ 3.7× fewer weight bytes).
+- Every value is stored as an integer plus a shared **scale** (and a **zero point** for asymmetric). Rounding error is at most half a step; 4 bits has much wider steps than 8 bits.
+- **Granularity** matters: per-tensor, per-channel or **per-group (g = 128)**. More scales = smaller errors but more memory.
+- **W4A16** (weight-only, GPTQ/AWQ) is best for small batches. **W8A8 FP8** also speeds up the math and is great for large batches on H100.
+- Activations have **outliers**. SmoothQuant moves them into the weights; AWQ uses them to protect important weights; GPTQ corrects errors column by column.
+- The **KV cache** can be FP8 too, doubling the tokens that fit. Always check quality with **perplexity** and **real tasks**.
+
+</Takeaways>
