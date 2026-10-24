@@ -1,0 +1,723 @@
+---
+// Interactive KV cache explorer: pick a model, context length, batch, KV format
+// and GPUs, and see how big the KV cache gets and how it slows each decode step.
+// Simple model:
+//   KV bytes   = 2 · layers · kv_heads · head_dim · bytes · context · batch
+//   room       = GPUs · memory · 0.9 − weights − 4 GB · GPUs
+//   step bytes = weights + KV (every sequence assumed at the full context)
+//   step time  = step bytes / (GPUs · bandwidth)
+interface Props {
+  model?: 'l2-7b' | 'l3-8b' | 'l3-70b' | 'l3-405b';
+  context?: number;
+  batch?: number;
+}
+const { model = 'l3-8b', context = 8192, batch = 32 } = Astro.props;
+const models = [
+  { id: 'l2-7b', label: 'Llama 2 7B' },
+  { id: 'l3-8b', label: 'Llama 3.1 8B' },
+  { id: 'l3-70b', label: '3.1 70B' },
+  { id: 'l3-405b', label: '3.1 405B' },
+];
+const gpus = ['L40S', 'H100', 'H200', 'B200'];
+---
+<div class="kvg card" data-kv-growth data-model={model} data-context={context} data-batch={batch}>
+  <div class="kvg-head">
+    <div class="kvg-title">
+      <strong>KV cache explorer</strong>
+      <span class="live-pill">live</span>
+    </div>
+    <div class="kvg-seg" role="group" aria-label="Model">
+      {models.map((m) => (
+        <button type="button" data-model-choice={m.id} aria-pressed={m.id === model ? 'true' : 'false'}>{m.label}</button>
+      ))}
+    </div>
+  </div>
+  <p class="kvg-sub">Every sequence keeps its own KV cache. Move the sliders and watch it grow, and watch each decode step get slower.</p>
+
+  <div class="kvg-body">
+    <div class="kvg-controls">
+      <label class="kvg-field">
+        <span class="kvg-row"><span class="kvg-label">Context length</span><span class="kvg-val"><b data-out="ctx"></b> tokens</span></span>
+        <input type="range" data-in="ctx" min="9" max="17" step="1" />
+        <span class="kvg-scale"><span>512</span><span>131,072</span></span>
+      </label>
+      <label class="kvg-field">
+        <span class="kvg-row"><span class="kvg-label">Batch (users)</span><span class="kvg-val"><b data-out="batch"></b> seqs</span></span>
+        <input type="range" data-in="batch" min="0" max="8" step="1" />
+        <span class="kvg-scale"><span>1</span><span>256</span></span>
+      </label>
+      <div class="kvg-field">
+        <span class="kvg-row"><span class="kvg-label">KV format</span><span class="kvg-val"><b data-out="kvb"></b> bytes / number</span></span>
+        <div class="kvg-seg kvg-seg-full" role="group" aria-label="KV cache format">
+          <button type="button" data-kv-choice="BF16" aria-pressed="true">BF16</button>
+          <button type="button" data-kv-choice="FP8" aria-pressed="false">FP8</button>
+        </div>
+      </div>
+      <div class="kvg-field">
+        <span class="kvg-row"><span class="kvg-label">GPUs</span><span class="kvg-val"><b data-out="gpuline"></b></span></span>
+        <div class="kvg-seg kvg-seg-full" role="group" aria-label="GPU type">
+          {gpus.map((g) => (
+            <button type="button" data-gpu-choice={g} aria-pressed={g === 'H100' ? 'true' : 'false'}>{g}</button>
+          ))}
+        </div>
+        <div class="kvg-seg kvg-seg-full" role="group" aria-label="Number of GPUs">
+          {[1, 2, 4, 8].map((n) => (
+            <button type="button" data-n-choice={n} aria-pressed={n === 1 ? 'true' : 'false'}>{n} ×</button>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    <div class="kvg-right">
+      <div class="kvg-plot">
+        <svg data-plot viewBox="0 0 420 270" role="img" aria-label="KV cache size as the context grows, compared with the weights and the memory room"></svg>
+      </div>
+      <div class="kvg-bar-wrap">
+        <div class="kvg-bar-head mono"><span>Usable GPU memory</span><span data-out="usable"></span></div>
+        <div class="kvg-bar" data-bar>
+          <span class="seg-w" data-seg="w"></span><span class="seg-o" data-seg="o"></span><span class="seg-k" data-seg="k"></span>
+        </div>
+        <div class="kvg-legend mono">
+          <span><i class="dot-w"></i>weights <b data-out="w"></b></span>
+          <span><i class="dot-o"></i>overhead <b data-out="o"></b></span>
+          <span><i class="dot-k"></i>KV cache <b data-out="k"></b></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="kvg-results">
+    <div class="kvg-cell"><span class="kvg-k">KV per token</span><span class="kvg-v" data-out="perTok"></span><span class="kvg-s" data-out="perTokSub"></span></div>
+    <div class="kvg-cell"><span class="kvg-k">KV ÷ weights</span><span class="kvg-v" data-out="ratio"></span><span class="kvg-s">size of KV vs model</span></div>
+    <div class="kvg-cell"><span class="kvg-k">Read per step</span><span class="kvg-v" data-out="step"></span><span class="kvg-s" data-out="stepSub"></span></div>
+    <div class="kvg-cell"><span class="kvg-k">Speed</span><span class="kvg-v" data-out="tps"></span><span class="kvg-s" data-out="tpsSub"></span></div>
+  </div>
+  <div class="kvg-foot">
+    <span class="kvg-badge" data-out="badge"></span>
+    <span class="kvg-msg" data-out="msg"></span>
+  </div>
+  <p class="kvg-note">Simple model: weights in BF16, 90% of memory usable, about 4 GB overhead per GPU, every sequence at the full context length, and perfect splitting across GPUs. Real engines are a little slower.</p>
+</div>
+
+<script>
+  type Model = { name: string; P: number; L: number; H: number; d: number };
+  type Gpu = { mem: number; bw: number };
+  const MODELS: Record<string, Model> = {
+    'l2-7b': { name: 'Llama 2 7B', P: 6.74e9, L: 32, H: 32, d: 128 },
+    'l3-8b': { name: 'Llama 3.1 8B', P: 8.03e9, L: 32, H: 8, d: 128 },
+    'l3-70b': { name: 'Llama 3.1 70B', P: 70.6e9, L: 80, H: 8, d: 128 },
+    'l3-405b': { name: 'Llama 3.1 405B', P: 405.9e9, L: 126, H: 8, d: 128 },
+  };
+  // Memory in GB and bandwidth in TB/s (approximate datasheet values).
+  const GPUS: Record<string, Gpu> = {
+    L40S: { mem: 48, bw: 0.864 },
+    H100: { mem: 80, bw: 3.35 },
+    H200: { mem: 141, bw: 4.8 },
+    B200: { mem: 180, bw: 8.0 },
+  };
+  const OVERHEAD_GB = 4;
+  const UTIL = 0.9;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  // Plot geometry (viewBox 420 × 270)
+  const L0 = 48, R0 = 410, T0 = 14, B0 = 226;
+  const X_MIN = 9, X_MAX = 17; // log2(context)
+
+  function el(tag: string, attrs: Record<string, string | number>, text?: string) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function gb(bytes: number) {
+    const v = bytes / 1e9;
+    if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + ' TB';
+    if (v >= 100) return Math.round(v) + ' GB';
+    if (v >= 10) return v.toFixed(1) + ' GB';
+    return v.toFixed(2) + ' GB';
+  }
+  function tickLabel(bytes: number) {
+    const v = bytes / 1e9;
+    if (v >= 1000) return `${+(v / 1000).toFixed(1)}T`;
+    return v >= 10 || Number.isInteger(v) ? String(Math.round(v)) : String(+v.toFixed(1));
+  }
+  function fmtTok(n: number) {
+    return n >= 1024 && n % 1024 === 0 ? `${(n / 1024).toLocaleString('en-US')}K` : n.toLocaleString('en-US');
+  }
+  function fmtRate(v: number) {
+    if (v >= 100) return Math.round(v).toLocaleString('en-US');
+    if (v >= 10) return v.toFixed(1);
+    return v.toFixed(2);
+  }
+  function fmtTime(s: number) {
+    const ms = s * 1000;
+    if (ms >= 1000) return (ms / 1000).toFixed(2) + ' s';
+    return (ms >= 10 ? ms.toFixed(1) : ms.toFixed(2)) + ' ms';
+  }
+  function setFill(input: HTMLInputElement) {
+    const min = Number(input.min), max = Number(input.max), v = Number(input.value);
+    input.style.setProperty('--fill', `${((v - min) / (max - min)) * 100}%`);
+  }
+
+  let instances = 0;
+
+  function init(root: HTMLElement) {
+    const uid = ++instances;
+    const state = {
+      model: MODELS[root.dataset.model || ''] ? (root.dataset.model as string) : 'l3-8b',
+      ctxExp: Math.min(17, Math.max(9, Math.round(Math.log2(Number(root.dataset.context) || 8192)))),
+      batchExp: Math.min(8, Math.max(0, Math.round(Math.log2(Number(root.dataset.batch) || 32)))),
+      kv: 'BF16',
+      gpu: 'H100',
+      n: 1,
+    };
+    const q = <T extends Element>(sel: string) => root.querySelector<T>(sel)!;
+    const out = (name: string) => q<HTMLElement>(`[data-out="${name}"]`);
+    const ctxIn = q<HTMLInputElement>('[data-in="ctx"]');
+    const batchIn = q<HTMLInputElement>('[data-in="batch"]');
+    const svg = q<SVGSVGElement>('[data-plot]');
+    ctxIn.value = String(state.ctxExp);
+    batchIn.value = String(state.batchExp);
+
+    function render() {
+      const m = MODELS[state.model];
+      const g = GPUS[state.gpu];
+      const ctx = 2 ** state.ctxExp;
+      const batch = 2 ** state.batchExp;
+      const kvBytes = state.kv === 'FP8' ? 1 : 2;
+      const perTok = 2 * m.L * m.H * m.d * kvBytes;
+      const kvTotal = perTok * ctx * batch;
+      const weights = m.P * 2;
+      const usable = state.n * g.mem * UTIL * 1e9;
+      const overhead = state.n * OVERHEAD_GB * 1e9;
+      const room = usable - weights - overhead;
+      const fits = room > 0 && kvTotal <= room;
+      const stepBytes = weights + kvTotal;
+      const bw = state.n * g.bw * 1e12;
+      const step = stepBytes / bw;
+
+      out('ctx').textContent = ctx.toLocaleString('en-US');
+      out('batch').textContent = String(batch);
+      out('kvb').textContent = String(kvBytes);
+      out('gpuline').textContent = `${state.n} × ${state.gpu}`;
+      out('perTok').textContent = `${(perTok / 1024).toLocaleString('en-US')} KiB`;
+      out('perTokSub').textContent = `2 × ${m.L} × ${m.H} × ${m.d} × ${kvBytes} B`;
+      out('ratio').textContent = `${(kvTotal / weights).toFixed(kvTotal / weights >= 10 ? 0 : 2)} ×`;
+      out('step').textContent = gb(stepBytes);
+      out('stepSub').textContent = `${fmtTime(step)} per step`;
+      out('tps').textContent = `${fmtRate(batch / step)} tok/s`;
+      out('tpsSub').textContent = `${fmtRate(1 / step)} tok/s per user`;
+      out('usable').textContent = gb(usable);
+      out('w').textContent = gb(weights);
+      out('o').textContent = gb(overhead);
+      out('k').textContent = gb(kvTotal);
+
+      const badge = out('badge');
+      badge.classList.toggle('is-ok', fits);
+      badge.classList.toggle('is-bad', !fits);
+      if (room <= 0) {
+        badge.textContent = 'Weights do not fit';
+        out('msg').textContent = `${m.name} needs ${gb(weights)} for weights alone. Add GPUs or pick a bigger GPU.`;
+      } else if (fits) {
+        badge.textContent = `Fits · KV uses ${Math.round((kvTotal / room) * 100)}% of the room`;
+        const maxTok = Math.floor(room / perTok);
+        out('msg').textContent = `Room for KV: ${gb(room)} = about ${maxTok.toLocaleString('en-US')} tokens in total.`;
+      } else {
+        badge.textContent = `Does not fit · ${(kvTotal / room).toFixed(1)}× too big`;
+        const maxSeq = Math.floor(room / (perTok * ctx));
+        out('msg').textContent =
+          maxSeq >= 1
+            ? `Only about ${maxSeq} sequence${maxSeq === 1 ? '' : 's'} of ${fmtTok(ctx)} tokens fit in ${gb(room)}.`
+            : `Not even one sequence of ${fmtTok(ctx)} tokens fits in ${gb(room)}.`;
+      }
+
+      root.querySelectorAll<HTMLButtonElement>('[data-model-choice]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.modelChoice === state.model)));
+      root.querySelectorAll<HTMLButtonElement>('[data-kv-choice]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.kvChoice === state.kv)));
+      root.querySelectorAll<HTMLButtonElement>('[data-gpu-choice]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.gpuChoice === state.gpu)));
+      root.querySelectorAll<HTMLButtonElement>('[data-n-choice]').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.nChoice) === state.n)));
+      setFill(ctxIn);
+      setFill(batchIn);
+
+      // ---- memory bar (scaled to the larger of usable memory and what is needed) ----
+      const need = weights + overhead + kvTotal;
+      const scale = Math.max(usable, need);
+      const bar = q<HTMLElement>('[data-bar]');
+      bar.classList.toggle('over', need > usable);
+      bar.style.setProperty('--usable', `${(usable / scale) * 100}%`);
+      q<HTMLElement>('[data-seg="w"]').style.width = `${(weights / scale) * 100}%`;
+      q<HTMLElement>('[data-seg="o"]').style.width = `${(overhead / scale) * 100}%`;
+      q<HTMLElement>('[data-seg="k"]').style.width = `${(kvTotal / scale) * 100}%`;
+
+      // ---- plot: KV size vs context for this batch ----
+      const kvAt = (exp: number) => perTok * 2 ** exp * batch;
+      // Round the top of the y axis to a "nice" step so the tick labels are readable.
+      const rawTop = Math.max(weights, Math.max(room, 0), kvTotal, kvAt(X_MIN) * 4) * 1.2;
+      const rawStep = rawTop / 4;
+      const mag = 10 ** Math.floor(Math.log10(rawStep));
+      const yStep = [1, 2, 2.5, 5, 10].map((f) => f * mag).find((s) => s >= rawStep) as number;
+      const yMaxBytes = yStep * 4;
+      const px = (exp: number) => L0 + ((exp - X_MIN) / (X_MAX - X_MIN)) * (R0 - L0);
+      const py = (bytes: number) => B0 - (Math.min(bytes, yMaxBytes) / yMaxBytes) * (B0 - T0);
+      const pyRaw = (bytes: number) => B0 - (bytes / yMaxBytes) * (B0 - T0);
+
+      svg.replaceChildren();
+      const clipId = `kvg-clip-${uid}`;
+      const clip = el('clipPath', { id: clipId });
+      clip.append(el('rect', { x: L0, y: T0, width: R0 - L0, height: B0 - T0 }));
+      svg.append(clip);
+      // "does not fit" zone above the room line
+      if (room > 0 && room < yMaxBytes) {
+        svg.append(el('rect', { x: L0, y: T0, width: R0 - L0, height: py(room) - T0, class: 'kvg-zone' }));
+        svg.append(el('text', { x: R0 - 6, y: T0 + 14, class: 'kvg-zone-lbl', 'text-anchor': 'end' }, 'does not fit'));
+      }
+      // grid + ticks
+      for (let e = X_MIN; e <= X_MAX; e += 2) {
+        const x = px(e);
+        svg.append(el('line', { x1: x, y1: T0, x2: x, y2: B0, class: 'kvg-grid' }));
+        svg.append(el('text', { x, y: B0 + 15, class: 'kvg-tick', 'text-anchor': 'middle' }, fmtTok(2 ** e)));
+      }
+      for (let i = 0; i <= 4; i++) {
+        const v = (yMaxBytes / 4) * i;
+        const y = py(v);
+        svg.append(el('line', { x1: L0, y1: y, x2: R0, y2: y, class: 'kvg-grid' }));
+        svg.append(el('text', { x: L0 - 6, y: y + 3.5, class: 'kvg-tick', 'text-anchor': 'end' }, tickLabel(v)));
+      }
+      svg.append(el('rect', { x: L0, y: T0, width: R0 - L0, height: B0 - T0, class: 'kvg-frame' }));
+      // weights line
+      svg.append(el('line', { x1: L0, y1: py(weights), x2: R0, y2: py(weights), class: 'kvg-wline' }));
+      svg.append(el('text', { x: L0 + 6, y: py(weights) - 5, class: 'kvg-wlbl' }, `weights ${gb(weights)}`));
+      // room line
+      if (room > 0) {
+        svg.append(el('line', { x1: L0, y1: py(room), x2: R0, y2: py(room), class: 'kvg-rline' }));
+        svg.append(el('text', { x: L0 + 6, y: py(room) + 13, class: 'kvg-rlbl' }, `room for KV ${gb(room)}`));
+      }
+      // KV curve
+      // Draw the curve without clamping and clip it to the plot, so it leaves through the top
+      // instead of looking flat.
+      let d = '';
+      for (let e = X_MIN; e <= X_MAX + 1e-9; e += 0.125) {
+        const y = Math.max(pyRaw(kvAt(e)), T0 - 40);
+        d += `${d ? 'L' : 'M'}${px(e).toFixed(1)} ${y.toFixed(1)}`;
+      }
+      svg.append(el('path', { d, class: 'kvg-curve', 'clip-path': `url(#${clipId})` }));
+      // current point
+      const cx = px(state.ctxExp);
+      const cy = py(kvTotal);
+      svg.append(el('line', { x1: cx, y1: cy, x2: cx, y2: B0, class: 'kvg-guide' }));
+      svg.append(el('circle', { cx, cy, r: 10, class: 'kvg-halo' }));
+      svg.append(el('circle', { cx, cy, r: 6, class: fits ? 'kvg-dot' : 'kvg-dot bad' }));
+      const leftSide = cx > (L0 + R0) / 2;
+      svg.append(
+        el('text', { x: cx + (leftSide ? -12 : 12), y: Math.max(cy - 10, T0 + 26), class: 'kvg-dotlbl', 'text-anchor': leftSide ? 'end' : 'start' }, `KV ${gb(kvTotal)}`),
+      );
+      // axis titles
+      svg.append(el('text', { x: (L0 + R0) / 2, y: B0 + 34, class: 'kvg-axis', 'text-anchor': 'middle' }, `context length per sequence (batch ${batch})`));
+      svg.append(el('text', { x: 11, y: (T0 + B0) / 2, class: 'kvg-axis', 'text-anchor': 'middle', transform: `rotate(-90 11 ${(T0 + B0) / 2})` }, 'GB'));
+    }
+
+    root.querySelectorAll<HTMLButtonElement>('[data-model-choice]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.model = b.dataset.modelChoice!;
+        render();
+      }),
+    );
+    root.querySelectorAll<HTMLButtonElement>('[data-kv-choice]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.kv = b.dataset.kvChoice!;
+        render();
+      }),
+    );
+    root.querySelectorAll<HTMLButtonElement>('[data-gpu-choice]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.gpu = b.dataset.gpuChoice!;
+        render();
+      }),
+    );
+    root.querySelectorAll<HTMLButtonElement>('[data-n-choice]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.n = Number(b.dataset.nChoice);
+        render();
+      }),
+    );
+    ctxIn.addEventListener('input', () => {
+      state.ctxExp = Number(ctxIn.value);
+      render();
+    });
+    batchIn.addEventListener('input', () => {
+      state.batchExp = Number(batchIn.value);
+      render();
+    });
+    render();
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-kv-growth]').forEach(init);
+</script>
+
+<style is:global>
+  .kvg {
+    margin: 2.2em 0;
+    padding: 18px 20px 16px;
+    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .kvg-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .kvg-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 15px;
+  }
+  .kvg-sub {
+    margin: 6px 0 14px !important;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+  .kvg-seg {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface-3);
+  }
+  .kvg-seg button {
+    border: 0;
+    background: transparent;
+    color: var(--text-2);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 5px 9px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .kvg-seg button:hover {
+    color: var(--text);
+  }
+  .kvg-seg button[aria-pressed='true'] {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+  .kvg-seg-full {
+    display: flex;
+    margin-top: 6px;
+  }
+  .kvg-seg-full button {
+    flex: 1;
+  }
+  .kvg-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+    gap: 18px;
+    align-items: start;
+  }
+  .kvg-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .kvg-field {
+    display: block;
+    padding: 10px 12px 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .kvg-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .kvg-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-2);
+  }
+  .kvg-val {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .kvg-val b {
+    font-size: 15px;
+    color: var(--text);
+    margin-right: 2px;
+  }
+  .kvg-scale {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-3);
+  }
+  .kvg-right {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .kvg-plot {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    padding: 6px;
+  }
+  .kvg-plot svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    font-family: var(--font-mono);
+  }
+  .kvg-zone {
+    fill: var(--red-soft);
+  }
+  .kvg-zone-lbl {
+    fill: var(--red);
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .kvg-grid {
+    stroke: var(--border-strong);
+    stroke-dasharray: 2 4;
+  }
+  .kvg-frame {
+    fill: none;
+    stroke: var(--border-strong);
+  }
+  .kvg-tick {
+    fill: var(--text-3);
+    font-size: 9.5px;
+  }
+  .kvg-axis {
+    fill: var(--text-2);
+    font-size: 10px;
+    font-family: 'Inter', ui-sans-serif, sans-serif;
+  }
+  .kvg-wline {
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+  }
+  .kvg-wlbl {
+    fill: var(--accent-text);
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .kvg-rline {
+    stroke: var(--green);
+    stroke-width: 1.5;
+  }
+  .kvg-rlbl {
+    fill: var(--green);
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .kvg-curve {
+    fill: none;
+    stroke: var(--amber);
+    stroke-width: 3;
+    stroke-linejoin: round;
+  }
+  .kvg-guide {
+    stroke: var(--amber);
+    stroke-dasharray: 2 3;
+    opacity: 0.7;
+  }
+  .kvg-halo {
+    fill: var(--amber);
+    opacity: 0.18;
+  }
+  .kvg-dot {
+    fill: var(--green);
+    stroke: var(--surface);
+    stroke-width: 2;
+  }
+  .kvg-dot.bad {
+    fill: var(--red);
+  }
+  .kvg-dotlbl {
+    fill: var(--text);
+    font-size: 10.5px;
+    font-weight: 700;
+  }
+  .kvg-bar-wrap {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    padding: 10px 12px;
+  }
+  .kvg-bar-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-3);
+    margin-bottom: 7px;
+  }
+  .kvg-bar {
+    position: relative;
+    display: flex;
+    height: 12px;
+    border-radius: 6px;
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+  .kvg-bar span {
+    display: block;
+    height: 100%;
+    flex: none;
+  }
+  .kvg-bar .seg-w {
+    background: var(--accent);
+  }
+  .kvg-bar .seg-o {
+    background: var(--text-3);
+  }
+  .kvg-bar .seg-k {
+    background: var(--amber);
+  }
+  .kvg-bar.over::after {
+    content: '';
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    left: var(--usable);
+    width: 2px;
+    background: var(--red);
+  }
+  .kvg-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-2);
+  }
+  .kvg-legend b {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .kvg-legend i {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    margin-right: 5px;
+  }
+  .kvg-legend .dot-w {
+    background: var(--accent);
+  }
+  .kvg-legend .dot-o {
+    background: var(--text-3);
+  }
+  .kvg-legend .dot-k {
+    background: var(--amber);
+  }
+  .kvg-results {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .kvg-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 12px;
+    border-left: 1px solid var(--border);
+    min-width: 0;
+  }
+  .kvg-cell:first-child {
+    border-left: 0;
+  }
+  .kvg-k {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+  .kvg-v {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--accent-text);
+    white-space: nowrap;
+  }
+  .kvg-s {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-3);
+  }
+  .kvg-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    margin-top: 12px;
+  }
+  .kvg-badge {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 999px;
+  }
+  .kvg-badge.is-ok {
+    background: var(--green-soft);
+    color: var(--green);
+  }
+  .kvg-badge.is-bad {
+    background: var(--red-soft);
+    color: var(--red);
+  }
+  .kvg-msg {
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .kvg-note {
+    margin-top: 10px !important;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text-3);
+  }
+  @media (max-width: 760px) {
+    .kvg-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .kvg-results {
+      grid-template-columns: 1fr 1fr;
+    }
+    .kvg-cell:nth-child(3) {
+      border-left: 0;
+    }
+    .kvg-cell:nth-child(n + 3) {
+      border-top: 1px solid var(--border);
+    }
+  }
+  @media (max-width: 420px) {
+    .kvg {
+      padding: 14px 12px;
+    }
+    .kvg-seg button {
+      padding: 5px 6px;
+      font-size: 10.5px;
+    }
+  }
+</style>
