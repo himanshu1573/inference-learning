@@ -1,0 +1,46 @@
+---
+// CPU: a few big, smart cores and a big cache. GPU: many small, simple cores.
+const smCols = 12;
+const smRows = 7;
+---
+<svg viewBox="0 0 720 330" role="img" aria-label="A CPU has a few large cores with lots of cache and control logic. A GPU has thousands of small cores grouped into many SMs.">
+  <!-- CPU -->
+  <text x="20" y="28" class="t" font-size="14" font-weight="700">CPU</text>
+  <text x="62" y="28" class="t3" font-size="11.5">a few strong cores</text>
+  <rect x="20" y="42" width="320" height="214" rx="12" class="box" />
+  {[0, 1, 2, 3].map((c) =>
+    [0, 1].map((r) => (
+      <g>
+        <rect x={36 + c * 74} y={58 + r * 62} width="64" height="50" rx="6" class="box-a" />
+        <text x={68 + c * 74} y={87 + r * 62} class="ta" font-size="11" font-weight="600" text-anchor="middle">Core</text>
+      </g>
+    )),
+  )}
+  <rect x="36" y="186" width="182" height="54" rx="6" class="box2" />
+  <text x="127" y="212" class="t" font-size="11.5" font-weight="600" text-anchor="middle">Big cache</text>
+  <text x="127" y="228" class="t3" font-size="10.5" text-anchor="middle">keeps data close</text>
+  <rect x="228" y="186" width="96" height="54" rx="6" class="box2" />
+  <text x="276" y="212" class="t" font-size="11.5" font-weight="600" text-anchor="middle">Control</text>
+  <text x="276" y="228" class="t3" font-size="10.5" text-anchor="middle">smart guessing</text>
+  <text x="180" y="280" class="t2" font-size="12" text-anchor="middle">Server CPUs: about 16 to 128 cores</text>
+  <text x="180" y="300" class="t" font-size="12" font-weight="600" text-anchor="middle">Built to finish ONE task fast</text>
+  <text x="180" y="318" class="t3" font-size="11" text-anchor="middle">(low latency)</text>
+
+  <!-- GPU -->
+  <text x="380" y="28" class="t" font-size="14" font-weight="700">GPU</text>
+  <text x="422" y="28" class="t3" font-size="11.5">thousands of simple cores</text>
+  <rect x="380" y="42" width="320" height="214" rx="12" class="box" />
+  {Array.from({ length: smRows }, (_, r) =>
+    Array.from({ length: smCols }, (_, c) => (
+      <g>
+        <rect x={394 + c * 25.4} y={56 + r * 26} width="20" height="20" rx="3" class="box-a" stroke-width="0.6" />
+        {[0, 1].map((i) => [0, 1].map((j) => (
+          <rect x={398 + c * 25.4 + i * 7} y={60 + r * 26 + j * 7} width="5" height="5" rx="1" class="fill-a" opacity="0.55" />
+        )))}
+      </g>
+    )),
+  )}
+  <text x="540" y="280" class="t2" font-size="12" text-anchor="middle">H100: 132 SMs × 128 cores = 16,896 cores</text>
+  <text x="540" y="300" class="t" font-size="12" font-weight="600" text-anchor="middle">Built to finish MANY tasks at once</text>
+  <text x="540" y="318" class="t3" font-size="11" text-anchor="middle">(high throughput) · each box = one SM, dots = cores</text>
+</svg>

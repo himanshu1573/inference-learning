@@ -1,0 +1,30 @@
+---
+// CPU vs H100 on three numbers. Bars are scaled so H100 = full width in each group.
+const groups = [
+  { name: 'Math speed', unit: 'TFLOPS', cpu: 5, gpu: 989, cpuLabel: '~5', gpuLabel: '~989 (BF16)', ratio: '~200×' },
+  { name: 'Memory speed', unit: 'GB/s', cpu: 460, gpu: 3350, cpuLabel: '~460', gpuLabel: '3,350', ratio: '~7×' },
+  { name: 'Decode, 1 user', unit: 'tokens/s (best case)', cpu: 29, gpu: 209, cpuLabel: '~29', gpuLabel: '~209', ratio: '~7×' },
+];
+const W = 400;
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Compared with a server CPU, an H100 has about 200 times more math speed but only about 7 times more memory speed, so single-user decode is only about 7 times faster.">
+  {groups.map((g, i) => {
+    const y = 20 + i * 92;
+    return (
+      <g>
+        <text x="20" y={y + 14} class="t" font-size="13" font-weight="700">{g.name}</text>
+        <text x="20" y={y + 31} class="t3" font-size="11">{g.unit}</text>
+        <text x="190" y={y + 22} class="t2 mono" font-size="11" text-anchor="end">CPU</text>
+        <rect x="200" y={y + 10} width={W} height="16" rx="4" class="fill-soft" />
+        <rect x="200" y={y + 10} width={Math.max(3, (g.cpu / g.gpu) * W)} height="16" rx="3" style="fill: var(--text-3)" />
+        <text x={210 + Math.max(3, (g.cpu / g.gpu) * W)} y={y + 23} class="t2 mono" font-size="11">{g.cpuLabel}</text>
+        <text x="190" y={y + 50} class="ta mono" font-size="11" text-anchor="end" font-weight="600">H100</text>
+        <rect x="200" y={y + 38} width={W} height="16" rx="4" class="fill-a" />
+        <text x={W + 190} y={y + 51} class="mono" font-size="11" text-anchor="end" style="fill: var(--on-accent)">{g.gpuLabel}</text>
+        <rect x="620" y={y + 16} width="80" height="30" rx="15" class="box-a" />
+        <text x="660" y={y + 36} class="ta mono" font-size="13" font-weight="700" text-anchor="middle">{g.ratio}</text>
+      </g>
+    );
+  })}
+  <text x="20" y="292" class="t3" font-size="10.5">CPU = an example 64-core server CPU with 12 DDR5 memory channels. All numbers are rough peak values.</text>
+</svg>
