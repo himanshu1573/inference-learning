@@ -1,0 +1,381 @@
+---
+title: 'The Life of a Request'
+description: 'Follow one chat message from the moment you press Enter to the last word on your screen, and see where every millisecond goes.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import ReqPath from '../../../components/figures/inference-fundamentals/ReqPath.astro';
+import ReqTimeline from '../../../components/figures/inference-fundamentals/ReqTimeline.astro';
+import ReqChatTemplate from '../../../components/figures/inference-fundamentals/ReqChatTemplate.astro';
+import ReqSseStream from '../../../components/figures/inference-fundamentals/ReqSseStream.astro';
+import ReqPhaseMap from '../../../components/figures/inference-fundamentals/ReqPhaseMap.astro';
+
+In Phase 1 we studied the machine. Now we study the work. This chapter follows **one single chat message** on its full journey: from your app, through the server, into the GPU, and back to your screen as a stream of words. We will put a time on every step, so you can see where the waiting really happens.
+
+Think of this chapter as the map for all of Phase 2. Each later chapter zooms into one box of this map.
+
+<NewWords
+  words={[
+    { word: 'API', meaning: 'Application Programming Interface. A fixed way for one program to ask another program for something.' },
+    { word: 'HTTP request', meaning: 'A message sent over the internet to a server, like the one your browser sends to open a web page.' },
+    { word: 'OpenAI-compatible API', meaning: 'A popular request format for chat models. vLLM, SGLang and many other servers accept it.' },
+    { word: 'Chat template', meaning: 'A rule that turns a list of chat messages into one long text with special marker tokens.' },
+    { word: 'Special token', meaning: 'A token that is not normal text. It marks things like "a new message starts here" or "the answer is finished".' },
+    { word: 'Queue', meaning: 'A waiting line. Requests wait in it until the GPU has room for them.' },
+    { word: 'Streaming (SSE)', meaning: 'Sending the answer in small pieces as soon as each piece is ready. SSE means Server-Sent Events.' },
+    { word: 'Stop condition', meaning: 'A rule that tells the model when to stop writing, for example a special "end" token or a length limit.' },
+  ]}
+/>
+
+## The journey in one picture
+
+Here is the whole trip. Do not worry about the details yet. We will walk through every box, one by one.
+
+<Figure n="1.1" title="The path of one chat request" caption="Steps 1 to 4 run on normal CPUs. Steps 5 and 6 run on the GPU: prefill reads the whole prompt and makes the first token, then the decode loop makes one token per step, about 400 times for a medium answer. Steps 7 to 9 bring each token back to the user as text.">
+  <ReqPath />
+</Figure>
+
+In short:
+
+1. Your app sends an **HTTP request** with your messages.
+2. The **API server** checks it and turns the messages into one text using a **chat template**.
+3. The **tokenizer** cuts that text into token IDs.
+4. The request waits in a **queue** until the GPU has room for it.
+5. The GPU runs **prefill**: it reads the whole prompt and produces the first new token.
+6. The GPU runs the **decode loop**: one new token per step, again and again.
+7. The **detokenizer** turns each new token ID back into text.
+8. The server **streams** each small piece of text back to the app.
+9. The app shows the words on your screen.
+
+Let us follow a real example through all nine steps. Our model is **Llama 3.1 8B** (16 GB in BF16) on one **NVIDIA H100** GPU (80 GB memory, 3.35 TB/s, about 989 TFLOPS in BF16), the same setup we used in Phase 1.
+
+## Steps 1 and 2: the request and the API server
+
+Your app sends a message like this to the server. Almost every LLM server today understands this format, which was first made popular by OpenAI. It is called the **OpenAI-compatible API**.
+
+```json
+POST /v1/chat/completions
+{
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "messages": [
+    { "role": "system", "content": "You are a helpful assistant." },
+    { "role": "user", "content": "What is the capital of France?" }
+  ],
+  "max_tokens": 400,
+  "temperature": 0.7,
+  "stream": true
+}
+```
+
+Each field has a clear job:
+
+| Field | What it means |
+| --- | --- |
+| `model` | Which model should answer. One server can serve several models. |
+| `messages` | The conversation so far. Each message has a **role**: `system` (instructions), `user` (you) or `assistant` (the model's earlier answers). |
+| `max_tokens` | The longest answer you allow, counted in tokens. A safety limit for time and cost. |
+| `temperature` | How random the choice of the next token is. We explain it in the chapter on sampling. |
+| `stream` | If `true`, send the answer piece by piece. If `false`, wait and send it all at the end. |
+
+The API server is a normal program running on the CPU. It first **checks** the request: Is the model name correct? Is the prompt too long? Llama 3.1 can handle up to 128K tokens of context, but a server operator often sets a smaller limit to save memory. If the request breaks a rule, the server answers with an error right away, and the GPU never sees it.
+
+<Callout type="note">
+
+The model does not understand JSON. It only reads one long list of tokens. So the server must turn the list of messages into one text first. That is the job of the chat template.
+
+</Callout>
+
+## The chat template: from messages to one text
+
+During training, the chat version of a model ("Instruct") saw conversations written in **one exact format**, with special marker tokens between the messages. At inference time, we must use the **same format**. Otherwise the model gets confused, a bit like a person reading a letter where all the line breaks and names are missing.
+
+<Figure n="1.2" title="The Llama 3.1 chat template" caption="The server turns the JSON messages into one string. The blue pills are special tokens; each one is a single token in the vocabulary. The text ends with the header for the assistant, so the most natural thing for the model to do next is to write the assistant's answer.">
+  <ReqChatTemplate />
+</Figure>
+
+Look at the end of the text. It stops right after `<|start_header_id|>assistant<|end_header_id|>`. The model was trained to continue such a text with an answer. So we do not "ask" the model a question in any special way. We just give it a text where **the most likely continuation is a good answer**. This is a key idea: a chat model is still just a next-token guesser.
+
+Here are the special tokens of Llama 3.1 that appear above. Each is **one token** with its own ID in the vocabulary:
+
+| Special token | ID | Meaning |
+| --- | --- | --- |
+| `<\|begin_of_text\|>` | <span class="num">128000</span> | The very start of the whole text |
+| `<\|start_header_id\|>` | <span class="num">128006</span> | A role name starts |
+| `<\|end_header_id\|>` | <span class="num">128007</span> | The role name ends; the message follows |
+| `<\|eot_id\|>` | <span class="num">128009</span> | "End of turn": this message is finished |
+| `<\|end_of_text\|>` | <span class="num">128001</span> | The end of the whole text |
+
+<Callout type="warning" title="A wrong template gives bad answers">
+
+Every model family has its own template. Llama, Qwen, Mistral and Gemma all use different marker tokens. If you send Llama-style markers to a Qwen model, it will still answer, but the quality drops and it may not stop at the right place. Servers like vLLM read the correct template from the model's own files (the `chat_template` in `tokenizer_config.json`), so normally you do not have to write it by hand.
+
+</Callout>
+
+## Step 3: the tokenizer
+
+Next, the text is cut into tokens, and each token gets its ID. You met this idea in chapter 1.1, and the next chapter explains exactly how it works. For our example, the whole templated text becomes a few dozen tokens. In a real app, the prompt is often much longer: it may include a long system prompt, earlier messages, or a document. For the rest of this chapter we will use a prompt of **1,000 tokens**, which is a typical size.
+
+Tokenizing runs on the CPU and is fast. A good tokenizer handles roughly a million tokens per second on one CPU core, so 1,000 tokens take about **1 ms**. It is almost never the bottleneck for one request. (But see the deep dive at the end for what happens with thousands of requests at once.)
+
+## Step 4: the queue
+
+Now the request is a list of 1,000 token IDs, ready for the GPU. But the GPU is shared. It may already be working on many other requests.
+
+So the request enters a **queue**, a waiting line. A part of the server called the **scheduler** decides, many times per second, which requests the GPU works on next. It checks two main things: Is there enough GPU memory for this request? Is there room in the next batch of work?
+
+- On an **idle** server, the queue time is close to **0 ms**.
+- On a **busy** server, the queue time can grow to **seconds**, and it can become the largest part of the waiting time.
+
+<Callout type="analogy" title="A restaurant kitchen">
+
+The GPU is the kitchen and the scheduler is the head chef. Orders (requests) come in all the time. The chef does not cook one order from start to end before looking at the next one. Instead, the chef keeps many dishes on the stove at once and adds new orders as soon as there is space. When the kitchen is full, new orders wait at the door. That wait is the queue time.
+
+</Callout>
+
+How the scheduler groups requests together, which is called **batching**, is one of the most important ideas in LLM serving. Phase 3 is mostly about it.
+
+## Step 5: prefill, the first big step on the GPU
+
+The request leaves the queue and the GPU starts work. In the first step, called **prefill**, the model processes **all 1,000 prompt tokens together**. It does two things:
+
+1. It computes the internal data for every prompt token and saves the useful parts in GPU memory. This saved data is called the **KV cache**, and it lets the model avoid repeating this work later. (Chapter 2.7 explains it.)
+2. It produces the scores for the **first new token** and picks one.
+
+How long does prefill take? We can estimate it with the rule from Phase 1: one token needs about **2 FLOPs for every parameter**.
+
+<Derivation title="Prefill time for a 1,000-token prompt on one H100" result="About 16 ms in theory; about 30 ms in a real system. Prefill is compute-bound.">
+
+1. FLOPs for one token: 2 × the number of parameters.
+
+   $$
+   2 \times 8.03 \times 10^{9} \approx 16 \times 10^{9} \text{ FLOPs}
+   $$
+
+2. FLOPs for all 1,000 prompt tokens:
+
+   $$
+   1000 \times 16 \times 10^{9} = 16 \times 10^{12} \text{ FLOPs}
+   $$
+
+3. Divide by the peak speed of the H100 (about 989 TFLOPS in BF16):
+
+   $$
+   \frac{16 \times 10^{12}}{989 \times 10^{12} \text{ FLOPs/s}} \approx 0.016 \text{ s} = 16 \text{ ms}
+   $$
+
+4. Real kernels do not reach the peak. With about 50 to 60% of peak, which is normal, prefill takes about **30 ms**.
+
+5. Check the bottleneck: the weights (16 GB) are read once and used for 1,000 tokens, so the arithmetic intensity is about 1,000 FLOPs per byte. That is far above the H100 ridge point of about 295, so prefill is **limited by math, not memory**.
+
+</Derivation>
+
+Notice the last step. In the roofline chapter we saw that work above the ridge point is **compute-bound**. A long prompt gives the GPU plenty of math per byte of weights, so prefill keeps the Tensor Cores busy. This is the good case.
+
+## Step 6: the decode loop
+
+After prefill, the model has the first token. Now it writes the rest of the answer in the **decode loop**: one new token per step. In every step it:
+
+1. runs all 32 layers on **just one new token** (using the KV cache for all earlier tokens),
+2. turns the result into a score for each of the 128,256 tokens in the vocabulary,
+3. picks the next token (this is called **sampling**),
+4. checks whether it should stop.
+
+Each step must read **all 16 GB of weights** from memory to process a single token. That is very little math per byte, so decode is **memory-bound**.
+
+<Derivation title="Decode time for a 400-token answer on one H100" result="About 2.4 seconds for the whole answer, at about 6 ms per token.">
+
+1. Best case for one step: read all weights once.
+
+   $$
+   \frac{16 \times 10^{9} \text{ bytes}}{3.35 \times 10^{12} \text{ bytes/s}} \approx 4.8 \text{ ms}
+   $$
+
+2. A real system reaches about 80% of the memory bandwidth, and it also reads the KV cache. So a realistic step takes about **6 ms**.
+
+3. The first token came from prefill. The other 399 tokens each need one decode step.
+
+   $$
+   399 \times 6 \text{ ms} \approx 2{,}400 \text{ ms} = 2.4 \text{ s}
+   $$
+
+</Derivation>
+
+Compare the two derivations. Prefill handled **1,000 tokens in about 30 ms**. Decode needs **about 6 ms for every single token**. Per token, decode is roughly 200 times slower! This is the most important fact about LLM inference, and chapter 2.6 is all about it.
+
+## Steps 7 and 8: detokenize and stream
+
+Each new token is an ID, which is just a number. The **detokenizer** turns it back into text, like `" Paris"`. Then the server sends this small piece of text to your app right away. It does not wait for the whole answer.
+
+The most common way to do this is **Server-Sent Events (SSE)**. The HTTP connection stays open, and the server writes one small message, called an **event**, for each new piece of text:
+
+```text
+data: {"choices":[{"delta":{"content":"The"}}]}
+
+data: {"choices":[{"delta":{"content":" capital"}}]}
+
+data: {"choices":[{"delta":{"content":" of"}}]}
+
+...
+
+data: [DONE]
+```
+
+<Figure n="1.3" title="Streaming the answer" caption="Each event carries one small piece of text. The app adds each piece to the screen as soon as it arrives, so the user starts reading after about 73 ms instead of waiting 2.5 seconds for the full answer. The times are from our example.">
+  <ReqSseStream />
+</Figure>
+
+Streaming does not make the answer finish sooner. The last word still arrives after about 2.5 seconds. But it changes how the wait **feels**. People start reading after the first token, and most people read slower than about 6 ms per token (that would be over 100 words per second!). So a streamed answer feels almost instant.
+
+<Callout type="idea" title="Detokenizing is not always one token = one piece of text">
+
+Sometimes one token is only **part of a character**. For example, an emoji or a Hindi letter may be split over several tokens, because tokens are built from bytes (you will see why in the next chapter). Half a character cannot be printed. So the detokenizer keeps a small buffer and only sends text when it is complete. Servers call this **incremental detokenization**.
+
+</Callout>
+
+## When does the model stop?
+
+The decode loop does not know in advance how long the answer will be. After each step, the server checks the **stop conditions**:
+
+1. **The model wrote a stop token.** For Llama 3.1 Instruct this is `<|eot_id|>` (ID 128009): "my turn is finished". This is the normal, happy ending. The API reports `finish_reason: "stop"`.
+2. **The answer reached `max_tokens`.** The server cuts the answer. The API reports `finish_reason: "length"`. If you see this often, your answers are being cut in the middle.
+3. **A stop string appeared.** The user can give extra stop strings, like `"\n\nUser:"`.
+4. **The context is full.** Prompt plus answer cannot be longer than the model's context limit set on the server.
+5. **The user went away.** If the app closes the connection, a good server notices and stops the work, so the GPU does not waste time on an answer nobody will read.
+
+When the request finishes, its KV cache memory is freed, and the scheduler can give that space to a request waiting in the queue.
+
+## Where does the time go?
+
+Now we can put the whole request on a timeline. The network times here are an example for a user in the same region as the server; your numbers will differ.
+
+<Figure n="1.4" title="Example timeline for one request" caption="Top: the first 73 ms, until the first token reaches the user. Prefill is the biggest piece; on a busy server the queue can be even bigger. Bottom: the whole request. The decode loop takes about 97% of the total time.">
+  <ReqTimeline />
+</Figure>
+
+<Derivation title="Adding up the example" result="TTFT ≈ 73 ms and total time ≈ 2.5 s. Decode is about 97% of the total.">
+
+1. Time to first token (TTFT): every step before the first token reaches the user.
+
+   $$
+   20 + 2 + 1 + 0 + 30 + 20 = 73 \text{ ms}
+   $$
+
+   (network in, API and template, tokenize, queue, prefill, network out)
+
+2. The rest of the answer: 399 decode steps of about 6 ms.
+
+   $$
+   399 \times 6 \approx 2{,}394 \text{ ms}
+   $$
+
+3. Total time for the whole answer:
+
+   $$
+   73 + 2{,}394 \approx 2{,}467 \text{ ms} \approx 2.5 \text{ s}
+   $$
+
+4. Share of the total that is decode:
+
+   $$
+   \frac{2{,}394}{2{,}467} \approx 0.97 = 97\%
+   $$
+
+</Derivation>
+
+<KeyNumbers
+  items={[
+    { value: '~73 ms', label: 'time to first token (idle server)' },
+    { value: '~30 ms', label: 'prefill for 1,000 prompt tokens' },
+    { value: '~6 ms', label: 'per output token in decode' },
+    { value: '~97%', label: 'of total time spent in decode' },
+  ]}
+/>
+
+Three lessons come from this picture:
+
+- **TTFT** depends on the prompt length (prefill), the queue and the network.
+- **Total time** depends mostly on the number of output tokens and the speed of each decode step.
+- On a busy server, the **queue** can grow and dominate TTFT. A good scheduler keeps it small. That is a big part of Phase 3.
+
+<Callout type="real" title="What a real server looks like">
+
+In vLLM, steps 1 to 3 and 7 to 8 run in an **API server process**, and the scheduler plus the GPU work run in a separate **engine process**. They talk to each other through fast messages. Splitting them means that slow CPU work, like JSON parsing for thousands of users, does not block the GPU. SGLang and TensorRT-LLM have a similar split. We look inside vLLM in Phase 3.
+
+</Callout>
+
+<DeepDive title="Can the CPU side become the bottleneck?">
+
+For one request, the CPU work is tiny: about 1 ms to tokenize and a few microseconds per streamed token. But a server does not serve one request. It may serve hundreds at the same time.
+
+Suppose a GPU server produces **10,000 tokens per second** in total across all users (this is possible with large batches; you will see how in Phase 3). Then the CPU side must, every second:
+
+- detokenize 10,000 tokens, one by one, with a small buffer for each request,
+- build 10,000 small JSON events,
+- write them into hundreds of open HTTP connections,
+- tokenize all new prompts that arrive.
+
+If this work runs in the same process and thread as the scheduler, the GPU must wait each time the CPU is busy. Even 1 ms of delay per decode step is a big deal when a step takes only 6 ms: it is a 17% slowdown.
+
+This is why modern engines move the API server, tokenizer and detokenizer into separate processes, and why some servers send a few tokens per event instead of one. It is also why a GPU server with a weak CPU can be slower than you expect. Keep this in mind when you read about vLLM's architecture in Phase 3.
+
+</DeepDive>
+
+## The map of Phase 2
+
+Every box on our request path hides interesting engineering. Here is where each chapter of Phase 2 fits:
+
+<Figure n="1.5" title="Phase 2 on the request path" caption="Chapters 2.2 to 2.5 follow the path of the data through the model. Chapters 2.6 and 2.7 explain the two phases and the memory they need. Chapters 2.8 to 2.11 and 2.13 make the transformer layers faster or smaller. Chapter 2.12 writes several tokens per step, and 2.14 shows how to measure all of this.">
+  <ReqPhaseMap />
+</Figure>
+
+In the next chapter we open the first box: how the tokenizer turns text into token IDs, and why the way it does this changes the speed and cost of every request.
+
+## Check yourself
+
+<Quiz n={1} q="Why does the server need a chat template? Can't it just send the JSON to the model?">
+
+The model only reads one long list of tokens; it does not understand JSON. During training, the chat model saw conversations in one exact format with special marker tokens. The server must rebuild that same format, or the answer quality drops and the model may not stop correctly.
+
+</Quiz>
+
+<Quiz n={2} q="Your prompt grows from 1,000 to 4,000 tokens. Using our example numbers, roughly how does the prefill time change?">
+
+Prefill work grows with the number of prompt tokens: 4× more tokens means about 4× more FLOPs. So prefill goes from about 30 ms to about **120 ms** (a bit more in reality, because attention also grows with length). TTFT grows by about 90 ms.
+
+</Quiz>
+
+<Quiz n={3} q="A user complains that the answer appears fast at first, but the full answer takes a long time. Which phase should you look at?">
+
+The **decode** phase. The first token arriving quickly means TTFT is fine. A long total time means each decode step is slow or the answer has many tokens. Decode is memory-bound, so the speed of each step depends on memory bandwidth and on how many requests share the GPU.
+
+</Quiz>
+
+<Quiz n={4} q='The API returns finish_reason: "length" for many requests. What does it mean, and what can you do?'>
+
+The answers hit the `max_tokens` limit and were cut before the model finished. You can raise `max_tokens` (it costs more time and money per request), or ask for shorter answers in the prompt.
+
+</Quiz>
+
+<Quiz n={5} q="Streaming does not make the last token arrive sooner. So why does almost every chat app use it?">
+
+Because users start reading as soon as the first token arrives. In our example they wait about 73 ms instead of 2.5 seconds. The tokens then arrive faster than people can read, so the answer feels almost instant.
+
+</Quiz>
+
+<Takeaways>
+
+- A chat request goes: **API server → chat template → tokenizer → queue → prefill → decode loop → detokenizer → stream**.
+- The **chat template** turns messages into one text with special tokens. The model just continues that text.
+- **Prefill** reads the whole prompt at once and is **compute-bound** (about 30 ms for 1,000 tokens on an H100).
+- **Decode** writes one token per step and is **memory-bound** (about 6 ms per token). It is usually over 90% of the total time.
+- **TTFT** depends on network, queue and prefill. The **queue** can dominate on a busy server.
+- The model stops at a **stop token**, at **max_tokens**, at a stop string, or when the user leaves.
+
+</Takeaways>
