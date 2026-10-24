@@ -1,0 +1,39 @@
+---
+// FlashDecoding: split a long KV cache into chunks so all SMs work, then merge partial results.
+const sms = 132;
+const perRow = 33;
+const busy = (i: number) => i < 32;
+---
+<svg viewBox="0 0 720 360" role="img" aria-label="Top: a normal attention kernel for one decode token uses one block per head, so only 32 of 132 SMs are busy. Bottom: FlashDecoding splits the 64K cached tokens of each head into 16 chunks, so 512 blocks keep all SMs busy, and a small final step merges the partial results.">
+  <defs>
+    <marker id="ffd-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <text x="20" y="24" class="t" font-size="13" font-weight="700">Decode, batch 1, 32 heads, 64K cached tokens per head, on 132 SMs</text>
+
+  <!-- normal -->
+  <text x="20" y="54" class="t2" font-size="12" font-weight="600">Normal kernel: one block per head</text>
+  {Array.from({ length: sms }, (_, i) => (
+    <rect x={20 + (i % perRow) * 13} y={64 + Math.floor(i / perRow) * 13} width="10" height="10" rx="2" class={busy(i) ? 'box-a' : 'box'} style={busy(i) ? '' : 'opacity:0.5'} />
+  ))}
+  <text x="460" y="80" class="t" font-size="12"><tspan class="ta mono" font-weight="700">32</tspan> of 132 SMs busy</text>
+  <text x="460" y="98" class="t3" font-size="11">each busy SM reads 64K tokens alone</text>
+  <text x="460" y="116" class="t3" font-size="11">the other 100 SMs wait</text>
+
+  <!-- flash decoding -->
+  <text x="20" y="160" class="t2" font-size="12" font-weight="600">FlashDecoding: also split each head’s cache into 16 chunks of 4K</text>
+  <rect x="20" y="172" width="420" height="22" rx="4" class="box" />
+  {Array.from({ length: 16 }, (_, i) => (
+    <rect x={20 + i * 26.25} y="172" width="24" height="22" rx="3" class={i % 2 === 0 ? 'green' : 'amber'} />
+  ))}
+  <text x="460" y="188" class="t3 mono" font-size="10.5">one head’s KV cache (64K)</text>
+  {Array.from({ length: sms }, (_, i) => (
+    <rect x={20 + (i % perRow) * 13} y={212 + Math.floor(i / perRow) * 13} width="10" height="10" rx="2" class="box-a" />
+  ))}
+  <text x="460" y="226" class="t" font-size="12"><tspan class="ta mono" font-weight="700">32 × 16 = 512</tspan> blocks</text>
+  <text x="460" y="244" class="t3" font-size="11">all 132 SMs busy</text>
+
+  <path d="M240 270 V292" class="line-a" stroke-width="1.5" marker-end="url(#ffd-arrow)" />
+  <rect x="20" y="296" width="560" height="50" rx="10" class="violet" />
+  <text x="36" y="317" class="t" font-size="12" font-weight="700">Merge step</text>
+  <text x="36" y="335" class="t2" font-size="11">each chunk returns (max, sum, output); combine them with the online-softmax rescale</text>
+</svg>

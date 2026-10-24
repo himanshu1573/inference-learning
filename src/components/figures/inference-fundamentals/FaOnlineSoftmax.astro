@@ -1,0 +1,45 @@
+---
+// Online softmax with real numbers: two blocks, running max and sum, one rescale.
+---
+<svg viewBox="0 0 720 330" role="img" aria-label="Online softmax example. Scores 1 and 3 in block 1, scores 2 and 5 in block 2, values 10, 20, 30, 40. After block 1 the running max is 3, sum 1.135, output 21.35. Block 2 raises the max to 5, so the old numbers are multiplied by 0.135. The final answer 44.38 divided by 1.203 is 36.88, the same as the normal softmax.">
+  <defs>
+    <marker id="fao-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <!-- block 1 -->
+  <rect x="16" y="16" width="216" height="210" rx="12" class="box" />
+  <text x="30" y="40" class="ta mono" font-size="10.5" font-weight="700">BLOCK 1</text>
+  <text x="30" y="62" class="t2" font-size="11.5">scores <tspan class="t mono" font-weight="700">1, 3</tspan> · values <tspan class="t mono" font-weight="700">10, 20</tspan></text>
+  <text x="30" y="92" class="t mono" font-size="12">m = 3</text>
+  <text x="30" y="116" class="t mono" font-size="12">ℓ = e⁻² + e⁰</text>
+  <text x="30" y="134" class="t mono" font-size="12">  = 0.135 + 1 = 1.135</text>
+  <text x="30" y="160" class="t mono" font-size="12">o = 0.135·10 + 1·20</text>
+  <text x="30" y="178" class="t mono" font-size="12">  = 21.35</text>
+  <text x="30" y="210" class="t3" font-size="10.5">(o is not divided by ℓ yet)</text>
+
+  <path d="M232 120 H262" class="line-a" stroke-width="1.6" marker-end="url(#fao-arrow)" />
+
+  <!-- block 2 -->
+  <rect x="266" y="16" width="250" height="210" rx="12" class="box-a" style="fill-opacity:0.5" />
+  <text x="280" y="40" class="ta mono" font-size="10.5" font-weight="700">BLOCK 2</text>
+  <text x="280" y="62" class="t2" font-size="11.5">scores <tspan class="t mono" font-weight="700">2, 5</tspan> · values <tspan class="t mono" font-weight="700">30, 40</tspan></text>
+  <text x="280" y="92" class="t mono" font-size="12">new max m = 5</text>
+  <text x="280" y="116" class="tam mono" font-size="12" font-weight="700">fix old part: × e³⁻⁵ = × 0.135</text>
+  <text x="280" y="140" class="t mono" font-size="12">ℓ = 1.135·0.135 + e⁻³ + e⁰</text>
+  <text x="280" y="158" class="t mono" font-size="12">  = 0.154 + 0.050 + 1 = 1.203</text>
+  <text x="280" y="184" class="t mono" font-size="12">o = 21.35·0.135 + 0.050·30 + 40</text>
+  <text x="280" y="202" class="t mono" font-size="12">  = 2.89 + 1.49 + 40 = 44.38</text>
+
+  <path d="M516 120 H546" class="line-a" stroke-width="1.6" marker-end="url(#fao-arrow)" />
+
+  <!-- result -->
+  <rect x="550" y="56" width="154" height="128" rx="12" class="green" />
+  <text x="627" y="82" class="tg mono" font-size="10.5" font-weight="700" text-anchor="middle">FINAL</text>
+  <text x="627" y="112" class="t mono" font-size="13" text-anchor="middle">44.38 ÷ 1.203</text>
+  <text x="627" y="144" class="tg mono" font-size="20" font-weight="700" text-anchor="middle">36.88</text>
+  <text x="627" y="168" class="t3" font-size="10.5" text-anchor="middle">same as normal softmax</text>
+
+  <!-- check -->
+  <rect x="16" y="246" width="688" height="70" rx="10" class="box2" />
+  <text x="30" y="270" class="t2" font-size="11.5">Normal softmax, all at once: max = 5, weights e⁻⁴, e⁻², e⁻³, e⁰ = 0.018, 0.135, 0.050, 1 (sum 1.203)</text>
+  <text x="30" y="292" class="t2" font-size="11.5">output = (0.018·10 + 0.135·20 + 0.050·30 + 1·40) ÷ 1.203 = 44.38 ÷ 1.203 = <tspan class="tg mono" font-weight="700">36.88</tspan>  ✓</text>
+</svg>
