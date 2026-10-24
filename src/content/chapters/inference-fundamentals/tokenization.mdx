@@ -1,0 +1,362 @@
+---
+title: 'Tokens and Tokenizers'
+description: 'How text becomes numbers: bytes, Byte Pair Encoding, vocabularies, and why the way we cut text changes the speed and cost of every request.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import TokGranularity from '../../../components/figures/inference-fundamentals/TokGranularity.astro';
+import TokUtf8 from '../../../components/figures/inference-fundamentals/TokUtf8.astro';
+import TokBpeSteps from '../../../components/figures/inference-fundamentals/TokBpeSteps.astro';
+import TokVocabTradeoff from '../../../components/figures/inference-fundamentals/TokVocabTradeoff.astro';
+import TokLanguages from '../../../components/figures/inference-fundamentals/TokLanguages.astro';
+import TokenizerPlayground from '../../../components/widgets/TokenizerPlayground.astro';
+
+A model cannot read letters. It can only do math with numbers. So before anything else happens, a small program called the **tokenizer** cuts your text into pieces and gives each piece a number. This sounds like a boring detail, but it is not. The way we cut text decides **how many tokens** a request has, and the number of tokens decides the time, the memory and the money that every request costs.
+
+In this chapter you will build a tokenizer by hand, step by step, and then play with a small one in your browser.
+
+<NewWords
+  words={[
+    { word: 'Tokenizer', meaning: 'The program that turns text into token IDs, and token IDs back into text.' },
+    { word: 'Vocabulary', meaning: 'The full list of tokens a model knows. Llama 3.1 has 128,256 of them.' },
+    { word: 'Token ID', meaning: 'The number of a token in the vocabulary. The model only sees these numbers.' },
+    { word: 'Byte', meaning: 'A group of 8 bits. It can hold a number from 0 to 255. Computers store all text as bytes.' },
+    { word: 'UTF-8', meaning: 'The most common way to store text as bytes. One character takes 1 to 4 bytes.' },
+    { word: 'BPE (Byte Pair Encoding)', meaning: 'A method that builds a vocabulary by joining the most common pairs of pieces again and again.' },
+    { word: 'Merge', meaning: 'One learned rule in BPE: "when you see piece A followed by piece B, join them into AB".' },
+    { word: 'Pre-tokenization', meaning: 'A first, simple split of the text into chunks (words, numbers, punctuation) before BPE runs.' },
+  ]}
+/>
+
+## Three ways to cut text
+
+Let us start with a simple question. What should one token be? There are three obvious choices.
+
+<Figure n="2.1" title="Characters, words or subwords?" caption="Cutting by characters gives a tiny vocabulary but very long sequences. Cutting by whole words gives short sequences but cannot handle new words. Subwords sit in the middle: common words are one token, rare words are built from a few common pieces. The split shown for subwords is an example.">
+  <TokGranularity />
+</Figure>
+
+**Option 1: one token per character.** The vocabulary is small: letters, digits and punctuation. Every word can be written. But texts become very long. A long sequence is expensive, because the model must process every token, and attention (the part where tokens look at each other) gets much more expensive as the sequence grows.
+
+**Option 2: one token per word.** Sequences are short. But there are millions of words in English alone, plus names, typos, new words like "vibecoding", code, and every other language. The vocabulary would be gigantic, and any word that is not in it cannot be written at all.
+
+**Option 3: subwords.** Common words like "the" or " model" get their own token. Rare words are built from a few common pieces, like "un" + "believ" + "able". This is what all modern LLMs do.
+
+<Derivation title="How much longer is a text cut into characters?" result="About 4× more tokens, and attention work grows by about 15×.">
+
+1. A typical English document of **1,000 words** has about **5,000 characters** (about 5 characters per word, counting spaces).
+
+2. A subword tokenizer like Llama 3's gives about **1.3 tokens per word**:
+
+   $$
+   1000 \times 1.3 = 1{,}300 \text{ tokens}
+   $$
+
+3. So characters give this many times more tokens:
+
+   $$
+   \frac{5000}{1300} \approx 3.8
+   $$
+
+4. Attention compares every token with every earlier token, so its work grows with the **square** of the length:
+
+   $$
+   3.8^{2} \approx 14.8
+   $$
+
+</Derivation>
+
+So a character-level model would need about 4× more decode steps for the same answer, and about 15× more attention work for long texts. That is far too slow. Subwords win.
+
+## Text is really bytes
+
+Before we build a subword tokenizer, we need one more idea. Inside a computer, all text is stored as **bytes**. A byte is a small number from 0 to 255. The most common way to store text as bytes is called **UTF-8**.
+
+<Figure n="2.2" title="Characters become bytes in UTF-8" caption="English letters take 1 byte. Letters with accents take 2 bytes. Hindi, Chinese and many other scripts take 3 bytes per character. Emoji take 4 bytes.">
+  <TokUtf8 />
+</Figure>
+
+This gives us a clever trick. There are only **256 possible bytes**. If our vocabulary starts with all 256 bytes as tokens, then **any text in any language can always be tokenized**, even text the tokenizer has never seen. In the worst case, each byte becomes its own token. No word is ever "unknown".
+
+Llama 3, GPT-4 and most modern models use this idea. They are called **byte-level** tokenizers.
+
+## Building a tokenizer with BPE
+
+Now we can build the vocabulary. The most popular method is **Byte Pair Encoding (BPE)**. The idea is very simple:
+
+1. Start with the smallest pieces (bytes, or letters in our small example).
+2. Count every pair of pieces that appear next to each other in a big training text.
+3. Join the **most common pair** into one new piece. This new piece gets a new ID. This rule is called a **merge**.
+4. Repeat steps 2 and 3 until the vocabulary is as big as you want.
+
+Let us do it by hand. Our tiny training text has only five words, each used many times:
+
+| Word | How many times |
+| --- | --- |
+| hug | 10 |
+| pug | 5 |
+| pun | 12 |
+| bun | 4 |
+| hugs | 5 |
+
+We start with single letters: `b g h n p s u`. Now we count the pairs.
+
+<Derivation title="Counting pairs for the first merge" result="The pair u + g appears 20 times, more than any other pair, so the first merge is u + g → ug.">
+
+1. In **hug** (10 times) we see the pairs `h u` and `u g`, each 10 times.
+
+2. In **pug** (5 times): `p u` and `u g`, each 5 times.
+
+3. In **pun** (12 times): `p u` and `u n`, each 12 times.
+
+4. In **bun** (4 times): `b u` and `u n`, each 4 times.
+
+5. In **hugs** (5 times): `h u`, `u g` and `g s`, each 5 times.
+
+6. Now add up each pair:
+
+   $$
+   \text{u g} = 10 + 5 + 5 = 20
+   $$
+
+   $$
+   \text{p u} = 5 + 12 = 17, \quad \text{u n} = 12 + 4 = 16, \quad \text{h u} = 10 + 5 = 15
+   $$
+
+   $$
+   \text{b u} = 4, \quad \text{g s} = 5
+   $$
+
+</Derivation>
+
+The winner is `u g` with 20. So we add a new token `ug` to the vocabulary and rewrite every word with it. Then we count again and repeat.
+
+<Figure n="2.3" title="BPE training, three merges" caption="After each merge, the new token (blue) replaces the pair everywhere, and we count the pairs again. After three merges the vocabulary has 7 letters plus 3 new tokens. Real tokenizers do this about 128,000 times on trillions of words.">
+  <TokBpeSteps />
+</Figure>
+
+After three merges, our vocabulary is: `b g h n p s u ug un hug`. Notice what happened. Common pieces became tokens on their own (`ug`, `un`), and the most common whole word (`hug`) became a single token. Nobody told the algorithm what a word is. It found useful pieces just by counting.
+
+The output of training is two things:
+
+- the **vocabulary**: all tokens and their IDs,
+- the **merge list**: all the merges, **in the order they were learned**.
+
+## Using the tokenizer on new text
+
+To tokenize a new word, we start from its bytes (letters, in our example) and apply the merges **in the same order** they were learned.
+
+<Callout type="example" title="Tokenizing three new words">
+
+Our merge list is: 1) `u g → ug`, 2) `u n → un`, 3) `h ug → hug`.
+
+- **hugs** → `h u g s` → merge 1 → `h ug s` → merge 3 → `hug s`. Result: **2 tokens**.
+- **bugs** → `b u g s` → merge 1 → `b ug s`. Merges 2 and 3 do not apply. Result: **3 tokens**.
+- **thug** → `t h u g`. The letter `t` was never in our training text. A byte-level tokenizer still has `t` as one of its 256 byte tokens, so we get `t h u g` → `t h ug` → `t hug`. Result: **2 tokens**. Nothing is unknown.
+
+</Callout>
+
+This is the full idea of BPE. A real tokenizer is the same algorithm with a much bigger merge list.
+
+### Pre-tokenization: cutting into chunks first
+
+Real tokenizers add one step before BPE. A simple rule first cuts the text into **chunks**: words (with the space in front of them), numbers, punctuation and spaces. Merges are never allowed to cross from one chunk to another. This stops strange tokens like `"dog."` (a word glued to a full stop) from filling up the vocabulary.
+
+For example, a text might be split into chunks like this before BPE:
+
+| Text | Chunks before BPE |
+| --- | --- |
+| `The price is 1234567.` | `The` · `␣price` · `␣is` · `␣` · `123` · `456` · `7` · `.` |
+
+(`␣` shows a space.) Two details are worth noticing:
+
+- **The space belongs to the next word.** `" price"` and `"price"` are different tokens. This is why tokens in the examples of this book often start with a space.
+- **Numbers are cut into groups of up to 3 digits.** Llama 3 does this, like GPT-4. It keeps the number of number tokens small, and it makes arithmetic a bit easier for the model.
+
+## Try it yourself
+
+The playground below runs a real BPE tokenizer, but a very small one. When the page loaded, it learned about 400 merges from a short English text, exactly like our hand example. Move the slider to use more or fewer merges, and try the example texts.
+
+<TokenizerPlayground merges={300} />
+
+Things to try:
+
+- Start with **English** and move the slider from **0** to **400**. At 0, every byte is a token. With more merges, tokens get longer and the count drops by more than half.
+- Click **Hindi**. The number of tokens equals the number of bytes, even with all merges. Our toy learned only from English text, so it has **no merges** for Hindi. Each Hindi letter becomes 3 tokens, shown as hex bytes, because one byte is only part of a character.
+- Click **Numbers** and look at how the long number is cut into groups of up to 3 digits.
+- Click **IDs** to see what the model actually receives: just a list of numbers. Bytes have IDs 0 to 255; learned merges have IDs from 256 up.
+
+## The Llama 3 tokenizer
+
+Now let us look at a real one. Llama 3 (and Llama 3.1) uses a byte-level BPE tokenizer with:
+
+- **128,000** normal tokens (256 bytes plus the learned merges),
+- **256** special tokens, like `<|begin_of_text|>` and `<|eot_id|>`, most of them reserved for future use,
+- **128,256** tokens in total.
+
+In English text, one Llama 3 token is about **4 characters**, or about **¾ of a word**. Meta reports that the Llama 3 tokenizer needs up to about 15% fewer tokens than the Llama 2 tokenizer for the same text, mainly because its vocabulary is 4× bigger (Llama 2 had 32,000 tokens).
+
+So why not make the vocabulary even bigger? Because the vocabulary has a price inside the model.
+
+## The price of a big vocabulary
+
+The vocabulary size appears in **two big tables** inside the model:
+
+- The **embedding table** at the start: one row of 4,096 numbers for every token in the vocabulary. (Chapter 2.3 explains it.)
+- The **LM head** at the end: a matrix that turns the model's final 4,096 numbers into one score for every token in the vocabulary.
+
+<Derivation title="How big are the vocabulary tables in Llama 3.1 8B?" result="Each table is about 1.05 GB, and together they are about 13% of the model. The LM head costs about 1 GFLOP for every output token.">
+
+1. One table has one row per token and one column per hidden number:
+
+   $$
+   128{,}256 \times 4{,}096 \approx 525 \times 10^{6} \text{ numbers}
+   $$
+
+2. In BF16, each number takes 2 bytes:
+
+   $$
+   525 \times 10^{6} \times 2 \approx 1.05 \times 10^{9} \text{ bytes} = 1.05 \text{ GB}
+   $$
+
+3. Llama 3.1 8B has two such tables (embedding and LM head), so about 1.05 billion of its 8.03 billion parameters are vocabulary tables:
+
+   $$
+   \frac{2 \times 0.525}{8.03} \approx 0.13 = 13\%
+   $$
+
+4. For every output token, the LM head multiplies 4,096 numbers by the whole table. That is 2 FLOPs per table entry:
+
+   $$
+   2 \times 4{,}096 \times 128{,}256 \approx 1.05 \times 10^{9} \text{ FLOPs}
+   $$
+
+   This is about 6.5% of the 16 GFLOPs that one token needs in total.
+
+</Derivation>
+
+<Figure n="2.4" title="The vocabulary size trade-off" caption="Left: a bigger vocabulary cuts the same text into fewer tokens, which saves work in every step and fits more text into the context window. Right: but each vocabulary table grows with the number of tokens. With 32,000 tokens a table is about 0.26 GB; with 128,256 tokens it is about 1.05 GB.">
+  <TokVocabTradeoff />
+</Figure>
+
+So choosing the vocabulary size is a balance:
+
+- **Bigger vocabulary:** fewer tokens per text (faster prefill, fewer decode steps, more text in the context), but bigger tables and more work in the LM head for every output token.
+- **Smaller vocabulary:** smaller tables, but longer sequences.
+
+Most modern models today use vocabularies between about 100,000 and 256,000 tokens.
+
+## Not all languages cost the same
+
+A tokenizer learns its merges from its training text. If most of that text is English, then English gets the most merges, and English words become short lists of tokens. Other languages get fewer merges.
+
+Byte-level tokenizers also start from bytes, and many scripts need more bytes per character:
+
+<Figure n="2.5" title="The same greeting in four languages" caption="The same short greeting needs 19 bytes in English, but 50 bytes in Hindi, because each Hindi character takes 3 bytes in UTF-8. Fewer bytes per character and more learned merges both help English. These are exact byte counts; the final token counts depend on the tokenizer.">
+  <TokLanguages />
+</Figure>
+
+The result: the **same meaning** often needs **more tokens** in Hindi, Tamil, Arabic or many other languages than in English. With older tokenizers that were trained mostly on English, the difference could be several times. Newer tokenizers like Llama 3's added many tokens for other languages to reduce this gap, but it has not gone away.
+
+This matters for real systems:
+
+- **Cost.** APIs charge per token. More tokens for the same message means a higher bill.
+- **Speed.** More prompt tokens mean a longer prefill (higher TTFT). More output tokens mean more decode steps.
+- **Context.** A 128K-token context window holds fewer words in a language that needs more tokens per word.
+
+<Callout type="real" title="Count tokens, not words">
+
+When you plan the capacity of a service, always measure in **tokens with the real tokenizer** of your model, on **real user text**. A service whose users write in Hindi, or send code, or paste JSON, can have very different token counts from an English chatbot, even with the same number of words.
+
+</Callout>
+
+## Special tokens
+
+Besides normal text pieces, the vocabulary has **special tokens**. You met them in the last chapter: `<|begin_of_text|>`, `<|start_header_id|>`, `<|eot_id|>` and others. Each one is a **single token** with its own ID. The model learned their meaning during training: "a new message starts", "this turn is finished", and so on.
+
+<Callout type="warning" title="User text must not create special tokens">
+
+Imagine a user types the text `<|eot_id|>` into a chat box. If the tokenizer turned that text into the real special token, the user could end their message early and pretend to be the assistant or the system. This is a kind of **prompt injection**. So servers tokenize user text with special tokens **switched off**: the typed text `<|eot_id|>` becomes a few normal tokens like `<`, `|`, `eot`, and so on. Only the chat template is allowed to insert the real special tokens.
+
+</Callout>
+
+## Where the tokenizer runs and how fast it is
+
+The tokenizer runs on the **CPU**, not on the GPU. Good tokenizers are written in fast languages: Hugging Face `tokenizers` is written in Rust, and OpenAI's `tiktoken` has a Rust core. They process roughly a million tokens per second on one CPU core. The exact speed depends on the text and the machine, but the order of size is what matters.
+
+<KeyNumbers
+  items={[
+    { value: '128,256', label: 'tokens in the Llama 3 vocabulary' },
+    { value: '~4 chars', label: 'per token in English text' },
+    { value: '1.05 GB', label: 'one vocabulary table in BF16' },
+    { value: '~1 ms', label: 'to tokenize 1,000 tokens on one CPU core' },
+  ]}
+/>
+
+For one request, about 1 ms is nothing next to a 30 ms prefill. But a busy server tokenizes every prompt and detokenizes every output token for hundreds of users at once. That is why engines run tokenization in separate processes, away from the GPU scheduler, as we saw in the last chapter.
+
+<DeepDive title="Why can't some models count the letters in 'strawberry'?">
+
+A famous test asks a model: "How many times does the letter r appear in the word strawberry?" Many models answered "2" instead of "3". Why would a model that can write poems fail at this?
+
+Because the model **never sees the letters**. It sees token IDs. The word " strawberry" might be cut into two or three tokens, for example something like `" str"` + `"aw"` + `"berry"`, depending on the tokenizer. Each token is just a number to the model. To count the r's, the model must have learned, from training data, which letters are inside each of those token numbers. That is possible, but it is indirect knowledge, and it often fails.
+
+The same effect explains other strange behaviour:
+
+- **Spelling and reversing words** is hard, for the same reason.
+- **Arithmetic with long numbers** is hard when numbers are cut into odd groups. Cutting numbers into groups of 3 digits makes it more regular.
+- **A space changes everything.** `"Paris"` and `" Paris"` are different tokens with different IDs, so a prompt that ends with a trailing space can change the answer.
+
+When a model behaves strangely with exact characters, the first question to ask is: "What do the tokens look like?"
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="Why do modern tokenizers start from bytes instead of letters?">
+
+Because there are only 256 possible bytes, and every text in every language is a list of bytes. If the vocabulary contains all 256 bytes, any text can be tokenized, and no word is ever unknown. In the worst case each byte becomes one token.
+
+</Quiz>
+
+<Quiz n={2} q="In our BPE example, what would the fourth merge be, and why?">
+
+After three merges, the words are `hug` (10), `p ug` (5), `p un` (12), `b un` (4), `hug s` (5). The pair counts are `p un` = 12, `p ug` = 5, `hug s` = 5, `b un` = 4. The most common pair is **p + un → pun**, with 12.
+
+</Quiz>
+
+<Quiz n={3} q="A company's users write in Hindi, and the same messages need about 3× more tokens than in English. Name three effects on the service.">
+
+Higher **cost** (billing is per token); longer **prefill**, so higher TTFT; **more decode steps** for answers of the same meaning; and **less text** fits in the context window. Capacity planning must use token counts measured on real Hindi text.
+
+</Quiz>
+
+<Quiz n={4} q="Why not use a vocabulary of 1 million tokens to make every text very short?">
+
+Each vocabulary table (the embedding table and the LM head) would grow to about 1,000,000 × 4,096 × 2 bytes ≈ 8.2 GB, and the LM head would cost about 8 GFLOPs per output token. Also, many of those tokens would be rare, so the model would see each one only a few times in training and learn them badly.
+
+</Quiz>
+
+<Quiz n={5} q="Why must a server tokenize user text with special tokens switched off?">
+
+Otherwise a user could type a special token like `<|eot_id|>` and end their message early, then write text that the model reads as the assistant's or the system's words. This is prompt injection. Only the chat template should insert real special tokens.
+
+</Quiz>
+
+<Takeaways>
+
+- The **tokenizer** turns text into token IDs on the CPU. The model only sees these numbers.
+- **Subwords** balance a small vocabulary and short sequences. Characters are too long; whole words cannot handle new words.
+- Modern tokenizers are **byte-level**: they start from the 256 bytes, so no text is ever unknown.
+- **BPE** builds the vocabulary by merging the most common pair again and again, and tokenizes new text by applying the merges in order.
+- Llama 3 has **128,256** tokens, about **4 characters per token** in English. Each vocabulary table is about **1.05 GB**.
+- Different languages need **different numbers of tokens** for the same meaning. Always count real tokens.
+
+</Takeaways>
