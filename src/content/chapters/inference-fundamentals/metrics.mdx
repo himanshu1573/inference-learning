@@ -1,0 +1,541 @@
+---
+title: 'Metrics That Matter'
+description: 'TTFT, TPOT, end-to-end latency, throughput, percentiles and goodput: how to measure an LLM service from the user side and the GPU side, with real numbers.'
+---
+
+import NewWords from '../../../components/NewWords.astro';
+import Callout from '../../../components/Callout.astro';
+import Figure from '../../../components/Figure.astro';
+import Derivation from '../../../components/Derivation.astro';
+import DeepDive from '../../../components/DeepDive.astro';
+import KeyNumbers from '../../../components/KeyNumbers.astro';
+import Quiz from '../../../components/Quiz.astro';
+import Takeaways from '../../../components/Takeaways.astro';
+import MetRequestTimeline from '../../../components/figures/inference-fundamentals/MetRequestTimeline.astro';
+import MetItlGaps from '../../../components/figures/inference-fundamentals/MetItlGaps.astro';
+import MetBatchTradeoff from '../../../components/figures/inference-fundamentals/MetBatchTradeoff.astro';
+import MetPercentiles from '../../../components/figures/inference-fundamentals/MetPercentiles.astro';
+import MetGoodput from '../../../components/figures/inference-fundamentals/MetGoodput.astro';
+import LatencyTimeline from '../../../components/widgets/LatencyTimeline.astro';
+
+Every chapter so far has been about making inference **faster** or **cheaper**. But faster for whom? A user cares about how quickly the answer starts and how smoothly it flows. The company that pays for the GPUs cares about how many users one GPU can serve. These two goals often pull in **opposite directions**.
+
+To talk about this clearly, the field uses a small set of **metrics** (numbers we measure). This chapter explains each one, shows how to calculate it, and shows how they trade against each other. After this chapter, you will be able to read any LLM benchmark and know exactly what it is telling you, and what it is hiding.
+
+<NewWords
+  words={[
+    { word: 'Latency', meaning: 'How long something takes, measured in time (milliseconds or seconds).' },
+    { word: 'TTFT', meaning: 'Time To First Token: from sending the request until the first output token arrives.' },
+    { word: 'TPOT', meaning: 'Time Per Output Token: the average gap between output tokens after the first one.' },
+    { word: 'ITL', meaning: 'Inter-Token Latency: the gap between two tokens. Some tools use it for each gap, some for the average.' },
+    { word: 'End-to-end latency', meaning: 'From sending the request until the last token arrives. The total waiting time.' },
+    { word: 'Throughput', meaning: 'How much work the system does per second, for all users together (for example, tokens per second).' },
+    { word: 'Percentile (p50, p99)', meaning: 'p99 = 99% of requests were faster than this value. p50 is the middle value (the median).' },
+    { word: 'SLO', meaning: 'Service Level Objective: a target you promise to meet, like "TTFT under 500 ms for 99% of requests".' },
+    { word: 'Goodput', meaning: 'Throughput that counts only the requests that met the SLO.' },
+    { word: 'MFU / MBU', meaning: 'Model FLOPs Utilisation and Model Bandwidth Utilisation: how much of the GPU’s peak math or memory speed you really use.' },
+  ]}
+/>
+
+## The simple picture: a restaurant
+
+Imagine you order a five-course meal in a restaurant.
+
+- The time until the **first dish** arrives is what makes you feel "they are serving me". If you wait 20 minutes for the first dish, you get angry, even if the rest is fast.
+- After that, what matters is the **gap between dishes**. If each dish comes 2 minutes after the previous one, the meal feels smooth. If you wait 15 minutes between dishes, it feels slow.
+- The **total time** of the meal is the time to the first dish plus all the gaps.
+- The owner of the restaurant cares about something else: **how many meals the kitchen serves per hour**. A kitchen that cooks for 50 tables at once serves more meals per hour, but each table may wait longer between dishes.
+
+<Callout type="analogy" title="Map the restaurant to LLM serving">
+
+The **first dish** is the first token: its waiting time is **TTFT**. The **gap between dishes** is **TPOT**. The **total meal time** is **end-to-end latency**. **Meals per hour** is **throughput**. And the owner's dilemma, more tables means more meals but slower service, is the central trade-off of this chapter.
+
+</Callout>
+
+## One request, four numbers
+
+Let us follow one request from the user's side. The user sends a prompt. The request may wait in a **queue** if the server is busy. Then **prefill** reads the whole prompt and produces the first token. Then **decode** produces one token per step until the answer is finished. (If prefill and decode are new to you, see [Prefill and Decode](/inference-fundamentals/prefill-vs-decode).)
+
+<Figure n="14.1" title="The timeline of one request" caption="TTFT covers everything before the first token: waiting in the queue and the prefill (plus small costs like the network and the tokenizer). TPOT is the gap between later tokens. End-to-end latency is the whole thing, from sending the request to the last token.">
+  <MetRequestTimeline />
+</Figure>
+
+### TTFT: time to first token
+
+**TTFT** is the time from the moment the request is sent until the first output token arrives at the user. It includes:
+
+1. **Network** time to reach the server.
+2. **Queue** time, if the server is busy with other requests.
+3. **Tokenization** of the prompt (usually small).
+4. **Prefill**: the model reads all the prompt tokens. For long prompts, this is the biggest part.
+5. Sending the first token back.
+
+TTFT is what makes an app feel **responsive**. It grows with prompt length, and it grows a lot when the server is overloaded, because the queue gets long.
+
+### TPOT: time per output token
+
+**TPOT** is the average time between output tokens, **after the first one**. It is what makes the answer feel **smooth**. A TPOT of 20 ms means 50 new tokens per second appear on the screen.
+
+For one request with $N$ output tokens:
+
+$$
+\text{TPOT} = \frac{\text{E2E} - \text{TTFT}}{N - 1}
+$$
+
+We divide by $N - 1$, not $N$, because there are only $N - 1$ gaps after the first token. The first token's waiting time is already counted in TTFT.
+
+### End-to-end latency
+
+**End-to-end (E2E) latency** is the total time from sending the request to receiving the last token. If we turn the formula above around, we get the most useful equation of this chapter:
+
+$$
+\text{E2E} = \text{TTFT} + \text{TPOT} \times (N - 1)
+$$
+
+<Derivation title="How long does a 500-token answer take?" result="About 10.3 seconds in total. The user sees the first word after 0.3 s, then about 50 tokens per second.">
+
+1. Suppose the server gives TTFT = 300 ms and TPOT = 20 ms. The answer has $N = 500$ tokens.
+
+2. Time for all the gaps after the first token:
+
+   $$
+   20 \text{ ms} \times (500 - 1) = 9{,}980 \text{ ms}
+   $$
+
+3. Add TTFT:
+
+   $$
+   \text{E2E} = 300 + 9{,}980 = 10{,}280 \text{ ms} \approx 10.3 \text{ s}
+   $$
+
+4. Streaming speed after the first token:
+
+   $$
+   \frac{1}{\text{TPOT}} = \frac{1}{0.020 \text{ s}} = 50 \text{ tokens/s}
+   $$
+
+5. Average speed over the whole request (including TTFT):
+
+   $$
+   \frac{500 \text{ tokens}}{10.28 \text{ s}} \approx 48.6 \text{ tokens/s}
+   $$
+
+</Derivation>
+
+Notice that for long answers, **TPOT dominates E2E**. Here TPOT is responsible for 9.98 of the 10.28 seconds. For short answers with long prompts (for example, "classify this document: yes or no"), TTFT dominates instead. **Which metric matters depends on the shape of your workload.**
+
+## TPOT vs ITL: same idea, different names
+
+The gaps between tokens are not all equal. Most steps take about the same time, but sometimes a step is slow. For example, the engine may run another user's prefill in the same step (we see why in Phase 3, in the chapter on chunked prefill). The user then sees a short **stall**.
+
+<Figure n="14.2" title="Each gap between tokens of one request" caption="Most gaps are about 20 ms, but one gap is 118 ms because the GPU was busy with another user's prefill in that step. TPOT, the average gap, is about 24.4 ms. It hides the stall. Looking at each gap (ITL) shows it.">
+  <MetItlGaps />
+</Figure>
+
+This is why tools report two related numbers:
+
+- **TPOT**: the **average** gap for each request. One number per request.
+- **ITL (inter-token latency)**: the **individual** gaps. Many numbers per request, so you can see the stalls and their percentiles.
+
+<Callout type="warning" title="Read the definition before you compare">
+
+Names are not standard. Some benchmark tools use "ITL" for each individual gap, as above. Others use "ITL" to mean the per-request average, which is exactly TPOT. Some papers say **TBT** (time between tokens). When you compare two benchmarks, always check how each metric was defined, or you may compare different things.
+
+</Callout>
+
+<Derivation title="TPOT from the gaps in Figure 14.2" result="TPOT ≈ 24.4 ms, even though 23 of the 24 gaps are between 19 and 23 ms.">
+
+1. The request has 25 output tokens, so there are 24 gaps. They add up to:
+
+   $$
+   23 \text{ normal gaps} \approx 468 \text{ ms}, \qquad 1 \text{ stall} = 118 \text{ ms}, \qquad \text{sum} = 586 \text{ ms}
+   $$
+
+2. Average gap:
+
+   $$
+   \text{TPOT} = \frac{586}{24} \approx 24.4 \text{ ms}
+   $$
+
+3. Without the stall the average would be about $468 / 23 \approx 20.3$ ms. One stall raised the average by 20%, and the worst gap is almost **6×** the typical one.
+
+</Derivation>
+
+## How fast is fast enough?
+
+There is no single correct answer. It depends on who reads the output.
+
+**A human reading a chat answer.** People read silently at roughly 200 to 300 words per minute. This is only a rough rule of thumb, but it gives a useful target.
+
+<Derivation title="Reading speed in tokens per second (rule of thumb)" result="About 5 to 6 tokens per second is enough to keep up with a typical reader, so a TPOT below about 185 ms already feels fluent for plain chat.">
+
+1. Take a typical reading speed of 250 words per minute:
+
+   $$
+   \frac{250}{60} \approx 4.2 \text{ words per second}
+   $$
+
+2. English has about 1.3 tokens per word:
+
+   $$
+   4.2 \times 1.3 \approx 5.4 \text{ tokens per second}
+   $$
+
+3. As a gap between tokens:
+
+   $$
+   \frac{1}{5.4} \approx 0.185 \text{ s} = 185 \text{ ms}
+   $$
+
+</Derivation>
+
+So why do companies work so hard to get TPOT down to 10 or 20 ms? Because many outputs are **not read word by word**:
+
+- **Code** is often copied or run, not read as it streams. The user waits for the whole thing: E2E matters.
+- **AI agents** call the model many times in a row, and each call waits for the previous one. If an agent makes 10 calls of 500 tokens each, TPOT is multiplied by about 5,000.
+- **Reasoning models** write long hidden "thinking" before the answer. Thousands of tokens may pass before the user sees anything useful.
+- **Voice assistants** need the first words very quickly, or the conversation feels broken.
+
+## Throughput: the GPU's point of view
+
+**Throughput** is how much work the whole system does per second, for **all users together**. There are three common versions, and a benchmark should always say which one it reports:
+
+1. **Output tokens per second**: new tokens generated per second. The most common one.
+2. **Requests per second**: finished requests per second.
+3. **Total tokens per second**: input (prompt) tokens plus output tokens, per second.
+
+<Derivation title="Three throughputs for the same server" result="1,600 output tokens/s, 3.2 requests/s and 8,000 total tokens/s: three very different-looking numbers for the same situation.">
+
+1. A server decodes for 64 users at the same time, with TPOT = 40 ms. Each user gets 25 tokens per second, so together:
+
+   $$
+   \frac{64}{0.040 \text{ s}} = 1{,}600 \text{ output tokens/s}
+   $$
+
+2. Each request has 500 output tokens. Ignoring prefill time for this rough estimate:
+
+   $$
+   \frac{1{,}600}{500} = 3.2 \text{ requests/s}
+   $$
+
+3. Each request also had a 2,000-token prompt. Total tokens per request = 2,500, so:
+
+   $$
+   3.2 \times 2{,}500 = 8{,}000 \text{ total tokens/s}
+   $$
+
+</Derivation>
+
+<Callout type="warning">
+
+"Total tokens per second" can look very impressive, because input tokens are processed in parallel during prefill and are much cheaper than output tokens. A benchmark with long prompts and short answers can show a huge total-token number while the output speed is low. Always ask: **input or output tokens?**
+
+</Callout>
+
+## The big trade-off: latency vs throughput
+
+Now we connect the two points of view. In [The Roofline Model](/gpu-hardware/roofline) we saw that decode at small batch is memory-bound: each step must read all the weights once, **no matter how many users are in the batch**. So adding users to the batch is almost free at first. But each user also has a KV cache that must be read in every step (see [The KV Cache](/inference-fundamentals/kv-cache)), and that cost grows with every user.
+
+We can build a simple model for Llama 3.1 8B (BF16) on one H100, with 2,048 tokens of context per user:
+
+$$
+\text{TPOT}(B) \approx \underbrace{\frac{16.06 \text{ GB}}{3.35 \text{ TB/s}}}_{\text{weights: } 4.79 \text{ ms}} + B \times \underbrace{\frac{2048 \times 128 \text{ KiB}}{3.35 \text{ TB/s}}}_{\text{KV per user: } 0.080 \text{ ms}}
+$$
+
+<Derivation title="Per-user speed and total throughput at three batch sizes" result="Going from 1 to 128 users makes each user about 3× slower, but makes the GPU about 41× more productive.">
+
+1. **Batch 1:**
+
+   $$
+   \text{TPOT} = 4.79 + 1 \times 0.080 \approx 4.87 \text{ ms} \;\Rightarrow\; 205 \text{ tok/s per user}, \; 205 \text{ tok/s total}
+   $$
+
+2. **Batch 64:**
+
+   $$
+   \text{TPOT} = 4.79 + 64 \times 0.080 \approx 9.92 \text{ ms} \;\Rightarrow\; 101 \text{ tok/s per user}, \; 64 \times 100.8 \approx 6{,}450 \text{ tok/s total}
+   $$
+
+3. **Batch 128:**
+
+   $$
+   \text{TPOT} = 4.79 + 128 \times 0.080 \approx 15.05 \text{ ms} \;\Rightarrow\; 66 \text{ tok/s per user}, \; 128 \times 66.4 \approx 8{,}500 \text{ tok/s total}
+   $$
+
+4. Check the math is not the limit: at batch 128, the FLOPs per step are $2 \times 8.03 \times 10^{9} \times 128 \approx 2.1$ TFLOP, which takes about 2.1 ms at 989 TFLOPS. That is less than 15 ms, so the step is still memory-bound.
+
+</Derivation>
+
+<Figure n="14.3" title="Per-user speed falls, total throughput rises" caption="The simple model above. Total tokens per second (blue, right axis) rises fast and then starts to flatten, because reading every user's KV cache becomes the main cost. Tokens per second for each user (orange, left axis) falls slowly. Choosing a batch size means choosing a point on these two curves.">
+  <MetBatchTradeoff />
+</Figure>
+
+This picture explains a lot of real behaviour:
+
+- A server running **few** users gives each one great speed, but wastes most of the GPU. The cost per token is high.
+- A server running **many** users is efficient and cheap per token, but each user gets slower tokens.
+- There is also a hard limit: the KV cache must **fit** in memory. In this example, 128 users × 2,048 tokens × 128 KiB ≈ 34 GB fits on an H100, but 256 users would need about 69 GB, which does not fit next to the weights (see [Choosing Hardware](/gpu-hardware/choosing-hardware)).
+
+<Callout type="idea">
+
+There is no "fastest" setting. There is only the **best trade-off for your users**. Serving engines expose settings like the maximum batch size (in vLLM, `max_num_seqs`) so that you can choose where on these curves to run.
+
+</Callout>
+
+## Averages lie: percentiles
+
+So far we talked about one request. A real server handles thousands, and they do not all have the same latency. How do we describe them with one number?
+
+The **average** (mean) is the obvious choice, and it is a bad one. Here is why. Look at the TTFT of 10 requests.
+
+<Figure n="14.4" title="Ten requests: mean vs percentiles" caption="Eight requests got their first token in 180 to 260 ms. Two were unlucky: 900 ms and 2,400 ms. The mean (503 ms) describes nobody: it is much worse than what most users saw, and much better than what the unlucky users saw. Percentiles tell the real story.">
+  <MetPercentiles />
+</Figure>
+
+<Derivation title="Mean, p50, p90 and p99 of ten TTFT values" result="Mean 503 ms, but p50 = 225 ms, p90 = 900 ms and p99 = 2,400 ms.">
+
+1. The sorted values (ms): 180, 190, 200, 210, 220, 230, 240, 260, 900, 2,400.
+
+2. **Mean**: add them all and divide by 10.
+
+   $$
+   \frac{1{,}730 + 900 + 2{,}400}{10} = \frac{5{,}030}{10} = 503 \text{ ms}
+   $$
+
+3. **p50 (median)**: the middle value. With 10 values, take the average of the 5th and 6th:
+
+   $$
+   \frac{220 + 230}{2} = 225 \text{ ms}
+   $$
+
+4. **p90**: 90% of requests are at or below this value. With the simple "nearest rank" method, it is value number $0.9 \times 10 = 9$: **900 ms**.
+
+5. **p99**: value number $\lceil 0.99 \times 10 \rceil = 10$: **2,400 ms**. (With only 10 values, p99 is just the worst one. Real benchmarks use thousands of requests.)
+
+</Derivation>
+
+<Callout type="note">
+
+Different tools compute percentiles in slightly different ways (some interpolate between neighbouring values). With many requests, the methods give almost the same result. With very few requests, percentiles are not reliable at all.
+
+</Callout>
+
+Why care so much about the slow tail (p90, p99)? Because many apps make **several calls in a row**, and the slowest one decides how the whole thing feels.
+
+<Derivation title="Why p90 matters more than you think" result="If an agent makes 10 calls in a row, about 65% of agent runs will hit at least one slow (worse than p90) call.">
+
+1. By definition, 10% of calls are slower than p90. So the chance that one call is **not** slow is 0.9.
+
+2. For 10 independent calls, the chance that **none** is slow:
+
+   $$
+   0.9^{10} \approx 0.35
+   $$
+
+3. So the chance that **at least one** call is slow:
+
+   $$
+   1 - 0.35 = 0.65
+   $$
+
+</Derivation>
+
+For one call, p90 is "rare". For an agent, it is the **normal** experience. This is why serious teams set targets on p90 or p99, not on the mean.
+
+## SLOs and goodput
+
+An **SLO** (Service Level Objective) is a clear target. For an interactive chat service, it might be:
+
+> 99% of requests must have **TTFT ≤ 500 ms** and **TPOT ≤ 50 ms**.
+
+A request that meets the SLO is "good". A request that misses it still used the GPU, but it did not give the user what they needed.
+
+**Goodput** counts only the good requests. It was popularised for LLM serving by research on separating prefill and decode (the DistServe paper, 2024), and it is now a common way to compare systems:
+
+$$
+\text{goodput} = \text{requests per second} \times \text{share of requests that meet the SLO}
+$$
+
+<Derivation title="Which system is better?" result="System A has lower throughput but higher goodput, so it is the better system for this SLO.">
+
+1. **System A** finishes 10 requests per second, and 95% of them meet the SLO:
+
+   $$
+   10 \times 0.95 = 9.5 \text{ good requests per second}
+   $$
+
+2. **System B** pushes harder and finishes 14 requests per second, but under this load only 60% meet the SLO:
+
+   $$
+   14 \times 0.60 = 8.4 \text{ good requests per second}
+   $$
+
+3. B has **40% more throughput** but **12% less goodput**. Users of B are unhappy 40% of the time.
+
+</Derivation>
+
+<Figure n="14.5" title="Throughput vs goodput" caption="Raw throughput (grey) makes System B look better. Goodput (coloured) shows that System A delivers more requests that users are actually happy with.">
+  <MetGoodput />
+</Figure>
+
+<Callout type="real">
+
+When a vendor shows one big "tokens per second" number, ask three questions: **at what batch size or request rate**, **with what prompt and output lengths**, and **what were TTFT and TPOT at p99 at that point?** A throughput number without the latency next to it says very little.
+
+</Callout>
+
+## How well do we use the GPU? MFU and MBU
+
+The metrics above describe the service. Two more numbers describe how well we use the **hardware**:
+
+- **MFU (Model FLOPs Utilisation)**: the FLOPs per second the model really needs, divided by the GPU's peak FLOPs per second.
+- **MBU (Model Bandwidth Utilisation)**: the bytes per second the model really needs to read, divided by the GPU's peak memory bandwidth.
+
+<Derivation title="MFU of prefill and MBU of decode on one H100" result="Prefill: about 32% MFU, which is good. Decode at batch 1: MFU only about 0.24%, but MBU about 72%, which is also good.">
+
+1. **Prefill.** Suppose Llama 3.1 8B processes prompts at 20,000 tokens per second. Each token needs about $2 \times 8.03 \times 10^{9}$ FLOPs:
+
+   $$
+   2 \times 8.03 \times 10^{9} \times 20{,}000 \approx 321 \times 10^{12} \text{ FLOPs/s}
+   $$
+
+   $$
+   \text{MFU} = \frac{321}{989} \approx 32\%
+   $$
+
+2. **Decode at batch 1.** Suppose we measure 150 tokens per second. Each token reads the 16.06 GB of weights (the KV cache is small for one short request):
+
+   $$
+   16.06 \times 10^{9} \times 150 \approx 2.41 \times 10^{12} \text{ bytes/s}
+   $$
+
+   $$
+   \text{MBU} = \frac{2.41}{3.35} \approx 72\%
+   $$
+
+3. The same decode, measured as MFU:
+
+   $$
+   \frac{2 \times 8.03 \times 10^{9} \times 150}{989 \times 10^{12}} \approx 0.24\%
+   $$
+
+</Derivation>
+
+The lesson: **use MFU for compute-bound work (prefill) and MBU for memory-bound work (decode).** A decode MFU of 0.24% sounds terrible, but it is normal: decode is limited by memory, and an MBU of 72% says we are close to that limit. If your decode MBU is low, look for overheads like small kernels and CPU delays (see [Kernel Fusion and CUDA Graphs](/inference-fundamentals/kernels-and-graphs)).
+
+<KeyNumbers
+  items={[
+    { value: 'TTFT', label: 'feels responsive · queue + prefill' },
+    { value: 'TPOT', label: 'feels smooth · gap between tokens' },
+    { value: 'p99', label: 'the experience of the unlucky users' },
+    { value: 'Goodput', label: 'throughput that meets the SLO' },
+  ]}
+/>
+
+## Try it yourself
+
+Use the explorer below. First set TPOT by hand and see how prompt length, output length and queue time change TTFT and end-to-end latency. Then switch to **TPOT from batch**, which uses the simple Llama 3.1 8B on H100 model from this chapter. Things to try:
+
+- Make the prompt 32K tokens with a slow prefill speed. Watch TTFT become the biggest part of the request.
+- Make the output 2,000 tokens. Watch decode take over the timeline.
+- In batch mode, move the batch from 1 to 128. Each user gets slower, but the whole GPU produces many more tokens per second.
+- In batch mode, use a long prompt and batch 256. The KV cache no longer fits in memory.
+
+<LatencyTimeline />
+
+## How benchmarks are run
+
+You will run benchmarks yourself in Phase 5. Here is the basic idea, so you can read other people's results.
+
+**Offline (batch) benchmarks** send **all** requests at once and measure how fast the server finishes them. This gives the **maximum throughput**, but the latency numbers are meaningless, because most requests wait in a long queue. It is useful for jobs like summarising a million documents overnight.
+
+**Online (serving) benchmarks** send requests **over time**, at a chosen **request rate** (for example, 4 requests per second), and measure TTFT, TPOT and E2E for each one. Then they repeat at higher and higher rates. The result is a curve: latency stays low, then suddenly rises sharply when the server reaches its limit. Many tools exist for this; for example, recent versions of vLLM include a `vllm bench serve` command.
+
+Real users do not arrive at perfectly even intervals. Benchmarks usually model arrivals as a **Poisson process**: requests come at random times, with a fixed average rate. Random arrivals create **bursts**, and bursts create queues.
+
+<Derivation title="How bursty are random arrivals?" result="Even at an average of one request every 250 ms, about 18% of requests arrive less than 50 ms after the previous one.">
+
+1. With a Poisson process at rate $\lambda$ (requests per second), the chance that the next request arrives within time $t$ is:
+
+   $$
+   P(\text{gap} \le t) = 1 - e^{-\lambda t}
+   $$
+
+2. Take $\lambda = 4$ requests per second (average gap 250 ms) and $t = 0.05$ s:
+
+   $$
+   1 - e^{-4 \times 0.05} = 1 - e^{-0.2} \approx 1 - 0.82 = 0.18
+   $$
+
+</Derivation>
+
+So a server that can handle "4 requests per second on average" will still see moments where requests pile up. That is why TTFT at p99 grows long before the server is "full".
+
+<DeepDive title="Why latency explodes near full load: a little queueing theory">
+
+There is a famous and very simple model from queueing theory, called **M/M/1**: one server, random (Poisson) arrivals, and random service times. Let:
+
+- $\rho$ = **utilisation**: the fraction of time the server is busy (arrival rate ÷ maximum rate).
+- $S$ = the average time to serve one request when there is no queue.
+
+Then the average time a request waits in the queue is:
+
+$$
+W_{\text{queue}} = \frac{\rho}{1 - \rho} \times S
+$$
+
+Put in some numbers:
+
+| Utilisation $\rho$ | Average queue wait |
+| --- | --- |
+| 50% | $1 \times S$ |
+| 80% | $4 \times S$ |
+| 90% | $9 \times S$ |
+| 95% | $19 \times S$ |
+
+The wait does not grow in a straight line. It **explodes** as the server approaches 100% busy. An LLM server is more complex than M/M/1 (it batches many requests together, so it is more like many servers sharing one GPU), but the shape of the curve is the same. This is the deep reason why goodput peaks **below** maximum throughput: to keep p99 TTFT low, you must leave some free capacity. In Phase 4, autoscaling decisions are built on exactly this idea.
+
+</DeepDive>
+
+## Check yourself
+
+<Quiz n={1} q="A request has TTFT = 400 ms, TPOT = 25 ms and 801 output tokens. What is the end-to-end latency?">
+
+E2E = TTFT + TPOT × (N − 1) = 400 ms + 25 ms × 800 = 400 + 20,000 = **20,400 ms ≈ 20.4 s**.
+
+</Quiz>
+
+<Quiz n={2} q="Your users mostly send long documents and ask short yes/no questions about them. Which metric matters most, TTFT or TPOT? Why?">
+
+**TTFT.** The prompts are long, so prefill is expensive, and the answers are only a few tokens long, so there are almost no gaps between tokens. Almost all of the end-to-end latency is TTFT.
+
+</Quiz>
+
+<Quiz n={3} q="Benchmark X reports a mean TTFT of 300 ms. Benchmark Y reports a p99 TTFT of 900 ms. Can you say which system is faster?">
+
+No. They report different statistics. A mean of 300 ms could hide a p99 of several seconds, and a system with p99 = 900 ms might have a mean below 300 ms. You need the same percentile (and the same workload and request rate) from both to compare them.
+
+</Quiz>
+
+<Quiz n={4} q="Doubling the batch size raised total throughput by 60% but pushed p99 TPOT from 40 ms to 70 ms. The SLO is TPOT ≤ 50 ms at p99. Was it a good change?">
+
+Probably not. Throughput went up, but now most requests at the tail miss the SLO, so **goodput** likely went down. More tokens per second do not help if users get a slower experience than you promised.
+
+</Quiz>
+
+<Quiz n={5} q="A decode benchmark shows MFU = 0.5%. A colleague says the GPU is 'almost idle' and wants to buy a cheaper GPU with fewer FLOPS. What should you check first?">
+
+Check **MBU**. Decode is memory-bound, so a tiny MFU is normal. If MBU is high (for example, 70%), the GPU's memory bandwidth is the real limit, and a GPU with less bandwidth would be slower even if FLOPS do not matter much. Choose GPUs for decode by memory bandwidth and capacity, not only by FLOPS.
+
+</Quiz>
+
+<Takeaways>
+
+- **TTFT** (queue + prefill) makes an app feel responsive. **TPOT** (average gap between tokens) makes it feel smooth. **ITL** looks at each gap and shows stalls.
+- **E2E = TTFT + TPOT × (N − 1)**. Long answers are dominated by TPOT; long prompts with short answers by TTFT.
+- **Throughput** is work per second for all users. Always ask: output tokens, requests, or total tokens?
+- Bigger batches raise total throughput but lower per-user speed. Choosing a batch size means choosing a point on this trade-off.
+- **Averages lie.** Use p50 for the typical user and p90/p99 for the unlucky ones, especially for apps that make many calls.
+- **Goodput** counts only requests that meet the SLO. Use **MFU** for prefill and **MBU** for decode to judge how well you use the GPU.
+
+</Takeaways>
