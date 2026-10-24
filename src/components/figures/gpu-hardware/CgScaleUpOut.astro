@@ -1,0 +1,46 @@
+---
+// Scale-up (one NVLink domain) vs scale-out (servers joined by a network).
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Left: scale-up, one NVLink domain where 8 GPUs (or 72 in a GB200 NVL72 rack) share a very fast NVSwitch fabric. Right: scale-out, several servers connected through network cards to an InfiniBand or Ethernet switch, at about 50 GB/s per GPU.">
+  <!-- scale-up -->
+  <rect x="16" y="16" width="320" height="250" rx="14" class="box" />
+  <text x="32" y="42" class="t" font-size="13" font-weight="700">Scale-up: one NVLink domain</text>
+  <text x="32" y="60" class="t3" font-size="11">GPUs share one very fast fabric</text>
+  {Array.from({ length: 8 }).map((_, k) => {
+    const top = k < 4;
+    const x = 44 + (k % 4) * 70;
+    const y = top ? 78 : 186;
+    return (
+      <g>
+        <rect x={x} y={y} width="54" height="40" rx="7" class="box-a" />
+        <text x={x + 27} y={y + 25} class="ta mono" font-size="11" font-weight="600" text-anchor="middle">GPU</text>
+        <path d={top ? `M${x + 27} 118 V134` : `M${x + 27} 170 V186`} stroke-width="3" style="stroke: var(--violet)" />
+      </g>
+    );
+  })}
+  <rect x="40" y="134" width="272" height="36" rx="8" class="violet" />
+  <text x="176" y="157" class="tv" font-size="12" font-weight="700" text-anchor="middle">NVSwitch · ~450 GB/s each way</text>
+  <text x="176" y="252" class="t2" font-size="11" text-anchor="middle">HGX H100: 8 GPUs · GB200 NVL72: 72 GPUs</text>
+
+  <!-- scale-out -->
+  <rect x="384" y="16" width="320" height="250" rx="14" class="box" />
+  <text x="400" y="42" class="t" font-size="13" font-weight="700">Scale-out: many servers</text>
+  <text x="400" y="60" class="t3" font-size="11">servers talk over the network</text>
+  {[0, 1, 2].map((i) => (
+    <g>
+      <rect x="404" y={78 + i * 56} width="150" height="42" rx="8" class="box2" />
+      <text x="420" y={103 + i * 56} class="t" font-size="11.5" font-weight="600">Server {i + 1}</text>
+      {Array.from({ length: 8 }).map((_, k) => (
+        <rect x={486 + (k % 4) * 15} y={86 + i * 56 + Math.floor(k / 4) * 14} width="11" height="10" rx="2" class="box-a" stroke-width="0.8" />
+      ))}
+      <path d={`M554 ${99 + i * 56} H612`} class="line-a" stroke-width="2" style="stroke: var(--teal)" />
+    </g>
+  ))}
+  <rect x="612" y="78" width="76" height="154" rx="10" class="teal" />
+  <text x="650" y="142" class="tt" font-size="11.5" font-weight="700" text-anchor="middle">network</text>
+  <text x="650" y="158" class="tt" font-size="11.5" font-weight="700" text-anchor="middle">switch</text>
+  <text x="650" y="178" class="t3" font-size="9.5" text-anchor="middle">InfiniBand /</text>
+  <text x="650" y="190" class="t3" font-size="9.5" text-anchor="middle">Ethernet</text>
+  <text x="544" y="250" class="t2" font-size="11" text-anchor="middle">about 50 GB/s per GPU (one 400 Gb/s NIC each)</text>
+  <text x="360" y="292" class="t3" font-size="11.5" text-anchor="middle">Inside the domain, links are about 9× faster than the network, and have much lower latency.</text>
+</svg>

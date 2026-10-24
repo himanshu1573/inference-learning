@@ -1,0 +1,43 @@
+---
+// One-direction bandwidth of common links (about), compared with GPU memory.
+const rows = [
+  { n: 'PCIe Gen4 x16', v: 32, cls: 'box2' },
+  { n: 'InfiniBand NDR (400 Gb/s)', v: 50, cls: 'teal' },
+  { n: 'PCIe Gen5 x16', v: 64, cls: 'box2' },
+  { n: 'NVLink 4 (H100)', v: 450, cls: 'violet' },
+  { n: 'NVLink 5 (B200)', v: 900, cls: 'violet' },
+  { n: 'HBM3 memory (H100)', v: 3350, cls: 'box-a', broken: true },
+];
+const x0 = 220;
+const scale = 0.44; // px per GB/s, 1000 GB/s = 440 px
+---
+<svg viewBox="0 0 720 320" role="img" aria-label="Bandwidth in one direction. PCIe Gen4 about 32 GB/s, InfiniBand NDR about 50 GB/s, PCIe Gen5 about 64 GB/s, NVLink 4 about 450 GB/s, NVLink 5 about 900 GB/s, and the H100's own HBM memory about 3,350 GB/s.">
+  <text x="20" y="26" class="t" font-size="12.5" font-weight="700">Speed in one direction <tspan class="t3" font-weight="400">(GB/s, about)</tspan></text>
+  {[0, 250, 500, 750, 1000].map((v) => (
+    <g>
+      <path d={`M${x0 + v * scale} 40 V270`} class="line" stroke-dasharray="2 4" />
+      <text x={x0 + v * scale} y="286" class="t3 mono" font-size="10.5" text-anchor="middle">{v}</text>
+    </g>
+  ))}
+  {rows.map((r, i) => {
+    const y = 48 + i * 37;
+    const w = r.broken ? 470 : Math.max(4, r.v * scale);
+    return (
+      <g>
+        <text x={x0 - 10} y={y + 15} class="t2" font-size="12" text-anchor="end">{r.n}</text>
+        <rect x={x0} y={y} width={w} height="22" rx="4" class={r.cls} stroke-width="1" />
+        {r.broken && (
+          <g>
+            <rect x={x0 + 183} y={y - 1} width="12" height="24" style="fill: var(--surface)" />
+            <path d={`M${x0 + 180} ${y - 3} l8 28 M${x0 + 192} ${y - 3} l8 28`} class="line-t" stroke-width="1.5" />
+            <text x={x0 + w - 8} y={y + 15} class="mono" font-size="11.5" font-weight="700" text-anchor="end" style="fill: var(--accent-text)">3,350 (off the scale)</text>
+          </g>
+        )}
+        {!r.broken && (
+          <text x={x0 + w + 8} y={y + 15} class="t mono" font-size="11.5" font-weight="600">{r.v}</text>
+        )}
+      </g>
+    );
+  })}
+  <text x="20" y="310" class="t3" font-size="11">NVLink is often quoted for both directions together: 900 GB/s (H100) and 1.8 TB/s (B200).</text>
+</svg>

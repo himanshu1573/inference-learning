@@ -1,0 +1,49 @@
+---
+// Tensor parallelism in the MLP block with 2 GPUs: column split, row split, one all-reduce.
+---
+<svg viewBox="0 0 720 300" role="img" aria-label="Tensor parallelism on two GPUs. The input X goes to both GPUs. GPU 0 multiplies by A1 then B1 to get a partial result Z1. GPU 1 multiplies by A2 then B2 to get Z2. An all-reduce adds Z1 and Z2 so both GPUs get the full result Z.">
+  <defs>
+    <marker id="cg-tp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="t2" /></marker>
+  </defs>
+  <text x="290" y="24" class="tg" font-size="12" font-weight="700" text-anchor="middle">no communication needed here</text>
+  <path d="M140 32 H440" class="sg" stroke-width="1.2" stroke-dasharray="4 3" />
+  <text x="636" y="24" class="tv" font-size="12" font-weight="700" text-anchor="middle">GPUs talk here</text>
+
+  <!-- input -->
+  <rect x="16" y="120" width="76" height="60" rx="10" class="box2" />
+  <text x="54" y="146" class="t" font-size="14" font-weight="700" text-anchor="middle">X</text>
+  <text x="54" y="164" class="t3" font-size="10.5" text-anchor="middle">input</text>
+  <path d="M92 140 L132 96 M92 160 L132 214" class="line-t" stroke-width="1.3" marker-end="url(#cg-tp-arrow)" />
+
+  {[0, 1].map((g) => {
+    const y = g === 0 ? 50 : 170;
+    return (
+      <g>
+        <rect x="120" y={y} width="430" height="84" rx="12" class="box" />
+        <text x="132" y={y + 18} class="t3 mono" font-size="10.5">GPU {g}</text>
+        <rect x="140" y={y + 28} width="86" height="44" rx="8" class="box-a" />
+        <text x="183" y={y + 50} class="ta" font-size="13" font-weight="700" text-anchor="middle">× A{g + 1}</text>
+        <text x="183" y={y + 65} class="t3" font-size="9.5" text-anchor="middle">half the columns</text>
+        <path d={`M226 ${y + 50} H250`} class="line-t" stroke-width="1.3" marker-end="url(#cg-tp-arrow)" />
+        <rect x="254" y={y + 28} width="54" height="44" rx="8" class="box2" />
+        <text x="281" y={y + 55} class="t" font-size="13" font-weight="700" text-anchor="middle">Y{g + 1}</text>
+        <path d={`M308 ${y + 50} H332`} class="line-t" stroke-width="1.3" marker-end="url(#cg-tp-arrow)" />
+        <rect x="336" y={y + 28} width="86" height="44" rx="8" class="box-a" />
+        <text x="379" y={y + 50} class="ta" font-size="13" font-weight="700" text-anchor="middle">× B{g + 1}</text>
+        <text x="379" y={y + 65} class="t3" font-size="9.5" text-anchor="middle">half the rows</text>
+        <path d={`M422 ${y + 50} H446`} class="line-t" stroke-width="1.3" marker-end="url(#cg-tp-arrow)" />
+        <rect x="450" y={y + 28} width="88" height="44" rx="8" class="amber" />
+        <text x="494" y={y + 50} class="tam" font-size="13" font-weight="700" text-anchor="middle">Z{g + 1}</text>
+        <text x="494" y={y + 65} class="t3" font-size="9.5" text-anchor="middle">partial result</text>
+        <path d={`M538 ${y + 50} L570 ${g === 0 ? 130 : 170}`} class="line-t" stroke-width="1.3" marker-end="url(#cg-tp-arrow)" />
+      </g>
+    );
+  })}
+
+  <!-- all-reduce -->
+  <rect x="574" y="104" width="128" height="92" rx="12" class="violet" />
+  <text x="638" y="132" class="tv" font-size="13" font-weight="700" text-anchor="middle">all-reduce</text>
+  <text x="638" y="154" class="t mono" font-size="12.5" font-weight="600" text-anchor="middle">Z = Z1 + Z2</text>
+  <text x="638" y="176" class="t3" font-size="10.5" text-anchor="middle">both GPUs get Z</text>
+  <text x="360" y="284" class="t3" font-size="11.5" text-anchor="middle">Each GPU stores only half of A and half of B, so each GPU holds half of the weights.</text>
+</svg>

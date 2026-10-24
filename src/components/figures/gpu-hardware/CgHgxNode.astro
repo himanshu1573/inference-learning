@@ -1,0 +1,58 @@
+---
+// One 8-GPU server (HGX style): CPUs and NICs on a PCIe tree, GPUs joined by an NVSwitch fabric.
+const cols = Array.from({ length: 8 }, (_, k) => 80 + 80 * k);
+const sw = [120, 280, 440, 600];
+---
+<svg viewBox="0 0 720 400" role="img" aria-label="An 8-GPU server. Two CPUs connect to four PCIe switches. Each PCIe switch connects to two GPUs and two network cards. All eight GPUs also connect to an NVSwitch fabric, so every GPU can talk to every other GPU at about 900 GB/s.">
+  <!-- CPUs -->
+  <rect x="150" y="16" width="180" height="40" rx="10" class="box2" />
+  <text x="240" y="41" class="t" font-size="13" font-weight="700" text-anchor="middle">CPU 0 + system RAM</text>
+  <rect x="390" y="16" width="180" height="40" rx="10" class="box2" />
+  <text x="480" y="41" class="t" font-size="13" font-weight="700" text-anchor="middle">CPU 1 + system RAM</text>
+  <path d="M330 36 H390" class="line-t" stroke-width="1.4" />
+
+  <!-- CPU to switches -->
+  <path d="M240 56 L120 92 M240 56 L280 92 M480 56 L440 92 M480 56 L600 92" class="line-t" stroke-width="1.4" />
+  {sw.map((x) => (
+    <g>
+      <rect x={x - 60} y="92" width="120" height="30" rx="8" class="box" />
+      <text x={x} y="112" class="t2" font-size="11.5" font-weight="600" text-anchor="middle">PCIe switch</text>
+    </g>
+  ))}
+
+  <!-- switch to NIC and GPU -->
+  {cols.map((cx, k) => {
+    const s = sw[Math.floor(k / 2)];
+    return (
+      <g>
+        <path d={`M${s} 122 L${cx - 16} 148`} class="line-t" stroke-width="1.2" />
+        <path d={`M${s} 122 L${cx + 18} 140 V196`} class="line-t" stroke-width="1.2" />
+        <rect x={cx - 36} y="148" width="40" height="22" rx="5" class="teal" />
+        <text x={cx - 16} y="163" class="tt mono" font-size="9.5" font-weight="600" text-anchor="middle">NIC</text>
+      </g>
+    );
+  })}
+
+  <!-- GPUs -->
+  {cols.map((cx, k) => (
+    <g>
+      <rect x={cx - 32} y="196" width="64" height="54" rx="8" class="box-a" />
+      <text x={cx} y="219" class="t" font-size="12" font-weight="700" text-anchor="middle">GPU {k}</text>
+      <text x={cx} y="237" class="t3 mono" font-size="10" text-anchor="middle">80 GB</text>
+      <path d={`M${cx} 250 V292`} class="line-a" stroke-width="3" style="stroke: var(--violet)" />
+    </g>
+  ))}
+
+  <!-- NVSwitch -->
+  <rect x="40" y="292" width="640" height="40" rx="10" class="violet" />
+  <text x="360" y="311" class="tv" font-size="12.5" font-weight="700" text-anchor="middle">NVSwitch fabric</text>
+  <text x="360" y="326" class="t2" font-size="11" text-anchor="middle">every GPU talks to every GPU · about 450 GB/s each way per GPU</text>
+
+  <!-- legend -->
+  <path d="M40 366 H70" class="line-t" stroke-width="1.6" />
+  <text x="78" y="370" class="t2" font-size="11.5">PCIe Gen5 (about 64 GB/s each way)</text>
+  <path d="M300 366 H330" stroke-width="3" style="stroke: var(--violet)" />
+  <text x="338" y="370" class="t2" font-size="11.5">NVLink</text>
+  <rect x="410" y="358" width="26" height="16" rx="4" class="teal" />
+  <text x="444" y="370" class="t2" font-size="11.5">NIC: network card, 400 Gb/s to other servers</text>
+</svg>

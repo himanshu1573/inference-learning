@@ -1,0 +1,39 @@
+---
+// All-reduce: every GPU starts with its own vector, every GPU ends with the sum.
+const before = [
+  [1, 2, 0, 3],
+  [2, 1, 1, 0],
+  [0, 3, 2, 1],
+  [1, 0, 1, 2],
+];
+const sum = [4, 6, 4, 6];
+---
+<svg viewBox="0 0 720 270" role="img" aria-label="All-reduce. Before: GPU 0 has 1 2 0 3, GPU 1 has 2 1 1 0, GPU 2 has 0 3 2 1, GPU 3 has 1 0 1 2. After: every GPU has the sum 4 6 4 6.">
+  <defs>
+    <marker id="cg-ar-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10z" class="fill-a" /></marker>
+  </defs>
+  <text x="90" y="28" class="t" font-size="13" font-weight="700">Before</text>
+  <text x="470" y="28" class="t" font-size="13" font-weight="700">After</text>
+  {before.map((row, i) => (
+    <g>
+      <text x="20" y={66 + i * 46} class="t2" font-size="12" font-weight="600">GPU {i}</text>
+      {row.map((v, j) => (
+        <g>
+          <rect x={90 + j * 42} y={46 + i * 46} width="38" height="30" rx="6" class="box" />
+          <text x={109 + j * 42} y={66 + i * 46} class="t mono" font-size="13" text-anchor="middle">{v}</text>
+        </g>
+      ))}
+      <text x="420" y={66 + i * 46} class="t2" font-size="12" font-weight="600">GPU {i}</text>
+      {sum.map((v, j) => (
+        <g>
+          <rect x={470 + j * 42} y={46 + i * 46} width="38" height="30" rx="6" class="box-a" />
+          <text x={489 + j * 42} y={66 + i * 46} class="ta mono" font-size="13" font-weight="700" text-anchor="middle">{v}</text>
+        </g>
+      ))}
+    </g>
+  ))}
+  <path d="M276 128 H398" class="line-a" stroke-width="2" marker-end="url(#cg-ar-arrow)" />
+  <text x="337" y="118" class="ta" font-size="12" font-weight="700" text-anchor="middle">all-reduce</text>
+  <text x="337" y="146" class="t3" font-size="11" text-anchor="middle">(sum)</text>
+  <text x="360" y="252" class="t3" font-size="11.5" text-anchor="middle">Column by column: 1 + 2 + 0 + 1 = 4, 2 + 1 + 3 + 0 = 6, and so on. Every GPU gets the same result.</text>
+</svg>
